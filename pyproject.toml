@@ -1,0 +1,25 @@
+[project]
+name = "btc-liq-predictor"
+version = "0.1.0"
+description = "BTC Liquidation Zone Prediction System — 5-layer ML pipeline"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+collector     = ["websocket-client", "requests", "pandas"]
+feature       = ["pandas", "numpy"]
+ml            = ["lightgbm", "scikit-learn", "pandas", "numpy"]
+signal        = ["pandas", "requests"]
+server        = ["django>=4.2", "channels[daphne]>=4.0", "pandas"]
+dev           = ["pytest", "pytest-django", "flake8", "jupyter", "lightgbm", "catboost", "shap"]
+
+[tool.pytest.ini_options]
+testpaths     = ["tests"]
+python_files  = ["test_*.py"]
+python_classes= ["Test*"]
+python_functions = ["test_*"]
+addopts       = "-v --tb=short"
+
+[tool.flake8]
+max-line-length = 100
+ignore = ["E501", "W503"]
+exclude = [".venv", "__pycache__", "ml/artifacts", "data"]

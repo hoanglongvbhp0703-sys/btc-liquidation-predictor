@@ -1,0 +1,94 @@
+# ══════════════════════════════════════════════════════════════════
+#  BTC Liquidation Predictor — Makefile
+#  Usage: make <target>
+# ══════════════════════════════════════════════════════════════════
+
+PYTHON  := .venv/bin/python
+PIP     := .venv/bin/pip
+MANAGE  := $(PYTHON) server/manage.py
+
+.PHONY: help setup venv install fake-data train server \
+        collector features signal test lint clean
+
+# ── Default ──────────────────────────────────────────────────────
+help:
+	@echo ""
+	@echo "  BTC Liquidation Predictor"
+	@echo "  ─────────────────────────────────────────────"
+	@echo "  make setup        Bootstrap toàn bộ project"
+	@echo "  make venv         Tạo virtual environment"
+	@echo "  make install      Cài tất cả dependencies"
+	@echo ""
+	@echo "  make fake-data    Sinh fake data + train model (dev)"
+	@echo "  make train        Train LightGBM với data thật"
+	@echo ""
+	@echo "  make server       Chạy dashboard (port 8000)"
+	@echo "  make collector    Chạy data collector (Binance WS)"
+	@echo "  make features     Chạy feature engine"
+	@echo "  make signal       Chạy signal engine"
+	@echo ""
+	@echo "  make test         Chạy test suite"
+	@echo "  make lint         Kiểm tra code style"
+	@echo "  make clean        Xóa cache + build files"
+	@echo ""
+
+# ── Setup ────────────────────────────────────────────────────────
+setup: venv install
+	@echo "✓ Setup xong. Chạy 'make fake-data' để tạo data demo."
+
+venv:
+	python3 -m venv .venv
+	@echo "✓ venv tạo tại .venv/"
+
+install:
+	$(PIP) install --upgrade pip
+	$(PIP) install -r server/requirements.txt
+	$(PIP) install -r collector/requirements.txt
+	$(PIP) install -r feature_engine/requirements.txt
+	$(PIP) install -r signal/requirements.txt
+	$(PIP) install -r ml/requirements.txt
+	@echo "✓ Dependencies installed"
+
+# ── Data & Model ─────────────────────────────────────────────────
+fake-data:
+	$(PYTHON) scripts/generate_fake_data.py --hours 5
+	@echo "✓ Fake data + model ready. Chạy 'make server'."
+
+train:
+	$(PYTHON) ml/train.py
+
+# ── Services ─────────────────────────────────────────────────────
+server:
+	cd server && $(abspath $(PYTHON)) manage.py runserver 0.0.0.0:8000
+
+collector:
+	$(PYTHON) collector/main.py
+
+features:
+	$(PYTHON) feature_engine/run.py
+
+signal:
+	$(PYTHON) signal/run.py
+
+# ── Tests ────────────────────────────────────────────────────────
+test:
+	$(PYTHON) -m pytest tests/ -v
+
+test-unit:
+	$(PYTHON) -m pytest tests/unit/ -v
+
+test-integration:
+	$(PYTHON) -m pytest tests/integration/ -v
+
+# ── Code quality ─────────────────────────────────────────────────
+lint:
+	$(PYTHON) -m flake8 ml/ collector/ feature_engine/ signal/ server/ scripts/ \
+	    --max-line-length=100 --ignore=E501,W503
+
+# ── Cleanup ──────────────────────────────────────────────────────
+clean:
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -name "*.pyc" -delete 2>/dev/null || true
+	find . -name "*.pyo" -delete 2>/dev/null || true
+	rm -rf dist/ build/ *.egg-info/
+	@echo "✓ Cleaned"

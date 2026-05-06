@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BTC Liquidation Dashboard</title>
+  {% load static %}
+  <link rel="stylesheet" href="{% static 'css/style.css' %}">
+  <!-- Lightweight Charts (TradingView OSS) -->
+  <script src="{% static 'vendor/lightweight-charts.js' %}"></script>
+  <!-- Chart.js cho CVD bar chart -->
+  <script src="{% static 'vendor/chart.umd.js' %}"></script>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────── -->
+<header class="header">
+  <div class="header-left">
+    <span class="pair">BTC/USDT</span>
+    <span class="price" id="price">---</span>
+    <span class="change neutral" id="price-change">0.00%</span>
+  </div>
+  <div class="header-center">
+    <span class="label">Liq Upper</span>
+    <span class="liq-upper" id="liq-upper">---</span>
+    <span class="sep">|</span>
+    <span class="label">Liq Lower</span>
+    <span class="liq-lower" id="liq-lower">---</span>
+  </div>
+  <div class="header-right">
+    <span class="live-dot" id="live-dot">●</span>
+    <span class="live-label" id="ws-status">Connecting...</span>
+  </div>
+</header>
+
+<!-- ── Main grid ────────────────────────────────────────────── -->
+<div class="main-grid">
+
+  <!-- Chart -->
+  <section class="chart-section">
+    <div class="section-title">Price Chart <span class="tf-badge">1m</span></div>
+    <div id="chart"></div>
+  </section>
+
+  <!-- Signal Panel -->
+  <aside class="signal-panel">
+    <div class="section-title">Signal</div>
+
+    <div class="prob-block">
+      <div class="prob-label">Xác suất chạm thanh khoản <span class="prob-window">30p</span></div>
+      <div class="prob-bar-wrap">
+        <div class="prob-bar" id="prob-bar"></div>
+      </div>
+      <div class="prob-value" id="prob-value">---%</div>
+    </div>
+
+    <div class="signal-divider"></div>
+
+    <div class="signal-info" id="signal-info">
+      <div class="no-signal">Chưa có signal</div>
+    </div>
+
+    <div class="signal-divider"></div>
+
+    <div class="mini-stats">
+      <div class="mini-row">
+        <span class="mini-label">Dist TP</span>
+        <span class="mini-val" id="dist-upper">---%</span>
+      </div>
+      <div class="mini-row">
+        <span class="mini-label">Imbalance</span>
+        <span class="mini-val" id="imbalance">---</span>
+      </div>
+      <div class="mini-row">
+        <span class="mini-label">Funding</span>
+        <span class="mini-val" id="funding">---</span>
+      </div>
+      <div class="mini-row">
+        <span class="mini-label">OI Δ5m</span>
+        <span class="mini-val" id="delta-oi">---</span>
+      </div>
+    </div>
+  </aside>
+
+</div>
+
+<!-- ── Stats row ────────────────────────────────────────────── -->
+<div class="stats-row">
+
+  <div class="stat-card">
+    <div class="stat-title">CVD 5m</div>
+    <div class="cvd-value" id="cvd-value">---</div>
+    <div class="cvd-chart-wrap">
+      <canvas id="cvd-chart"></canvas>
+    </div>
+  </div>
+
+  <div class="stat-card">
+    <div class="stat-title">Order Book Imbalance</div>
+    <div class="gauge-wrap">
+      <div class="gauge-bar">
+        <div class="gauge-fill" id="imb-fill"></div>
+        <div class="gauge-marker" id="imb-marker"></div>
+      </div>
+      <div class="gauge-labels">
+        <span>SELL</span><span>NEUTRAL</span><span>BUY</span>
+      </div>
+    </div>
+    <div class="imb-pct" id="imb-pct">50%</div>
+  </div>
+
+  <div class="stat-card">
+    <div class="stat-title">Paper Trading</div>
+    <div class="paper-mini" id="paper-mini">
+      <div class="paper-stat">
+        <span class="paper-num win" id="win-count">0</span>
+        <span class="paper-lbl">WIN</span>
+      </div>
+      <div class="paper-stat">
+        <span class="paper-num loss" id="loss-count">0</span>
+        <span class="paper-lbl">LOSS</span>
+      </div>
+      <div class="paper-stat">
+        <span class="paper-num" id="wr-pct">--</span>
+        <span class="paper-lbl">Win Rate</span>
+      </div>
+      <div class="paper-stat">
+        <span class="paper-num" id="total-pnl">--</span>
+        <span class="paper-lbl">Total PnL</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Paper Trades Table ───────────────────────────────────── -->
+<section class="trades-section">
+  <div class="section-title">Paper Trades</div>
+  <div class="table-wrap">
+    <table class="trades-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Entry</th>
+          <th>TP</th>
+          <th>SL</th>
+          <th>R:R</th>
+          <th>Prob</th>
+          <th>Outcome</th>
+          <th>PnL</th>
+        </tr>
+      </thead>
+      <tbody id="trades-body">
+        <tr><td colspan="8" class="no-data">Chưa có data</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ── Signal Alert Popup ───────────────────────────────────── -->
+<div class="alert-popup" id="alert-popup">
+  <div class="alert-icon">🚀</div>
+  <div class="alert-body">
+    <div class="alert-title">BTC LONG SIGNAL</div>
+    <div class="alert-detail" id="alert-detail"></div>
+  </div>
+  <button class="alert-close" onclick="document.getElementById('alert-popup').classList.remove('show')">✕</button>
+</div>
+
+<script src="{% static 'js/chart.js' %}"></script>
+<script src="{% static 'js/signal.js' %}"></script>
+<script src="{% static 'js/trades.js' %}"></script>
+<script src="{% static 'js/app.js' %}"></script>
+
+</body>
+</html>

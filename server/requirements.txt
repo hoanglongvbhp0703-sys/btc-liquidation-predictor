@@ -1,0 +1,5 @@
+django>=4.2
+channels[daphne]>=4.0
+pandas
+xgboost
+scikit-learn
