@@ -35,7 +35,8 @@ from predict   import load_model, predict_signal   # noqa: E402
 from paper_log import log_signal, check_outcomes, print_stats   # noqa: E402
 from notifier  import notify_signal   # noqa: E402
 
-FEATURES_FILE = ROOT_DIR / "data" / "processed" / "features_5m.csv"
+from config import FEATURES_FILE, MODEL_LONG_FILE, SIGNAL_THRESHOLD, MIN_ROWS_TRAIN
+
 RUN_INTERVAL  = 300   # 5 phút
 STATS_EVERY   = 12    # in stats mỗi 12 chu kỳ = 1 giờ
 
@@ -84,7 +85,7 @@ def run_once(model_ctx: dict | None, cycle: int) -> dict | None:
     print(f"\n[SIG] ── {now.strftime('%Y-%m-%d %H:%M')} UTC ──")
 
     # ── (Re)load model nếu chưa có hoặc model file mới hơn ────────
-    model_file = ROOT_DIR / "model" / "saved" / "xgb_model.json"
+    model_file = MODEL_LONG_FILE
 
     if model_ctx is None:
         if model_file.exists():
@@ -166,8 +167,8 @@ def run_once(model_ctx: dict | None, cycle: int) -> dict | None:
 
 def _count_labeled_rows() -> int:
     try:
-        df = pd.read_csv(FEATURES_FILE, dtype={"label": str})
-        return int(df["label"].astype(str).str.match(r"^[01]$").sum())
+        df = pd.read_csv(FEATURES_FILE)
+        return int(pd.to_numeric(df["label"], errors="coerce").isin([0, 1]).sum())
     except Exception:
         return 0
 

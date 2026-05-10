@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BTC Liquidation Dashboard</title>
   {% load static %}
-  <link rel="stylesheet" href="{% static 'css/style.css' %}">
+  <link rel="stylesheet" href="{% static 'css/style.css' %}?v=4">
   <!-- Lightweight Charts (TradingView OSS) -->
   <script src="{% static 'vendor/lightweight-charts.js' %}"></script>
   <!-- Chart.js cho CVD bar chart -->
@@ -46,12 +46,28 @@
   <aside class="signal-panel">
     <div class="section-title">Signal</div>
 
+    <!-- LONG prob -->
     <div class="prob-block">
-      <div class="prob-label">Xác suất chạm thanh khoản <span class="prob-window">30p</span></div>
-      <div class="prob-bar-wrap">
-        <div class="prob-bar" id="prob-bar"></div>
+      <div class="prob-label">
+        <span style="color:var(--green)">▲ LONG</span>
+        — chạm Liq Upper <span class="prob-window">30p</span>
       </div>
-      <div class="prob-value" id="prob-value">---%</div>
+      <div class="prob-bar-wrap">
+        <div class="prob-bar" id="prob-bar-long"></div>
+      </div>
+      <div class="prob-value" id="prob-value-long">---%</div>
+    </div>
+
+    <!-- SHORT prob -->
+    <div class="prob-block" style="margin-top:4px">
+      <div class="prob-label">
+        <span style="color:var(--red)">▼ SHORT</span>
+        — chạm Liq Lower <span class="prob-window">30p</span>
+      </div>
+      <div class="prob-bar-wrap">
+        <div class="prob-bar prob-bar-short" id="prob-bar-short"></div>
+      </div>
+      <div class="prob-value" id="prob-value-short">---%</div>
     </div>
 
     <div class="signal-divider"></div>
@@ -86,6 +102,21 @@
 
 <!-- ── Stats row ────────────────────────────────────────────── -->
 <div class="stats-row">
+
+  <!-- Prob Curve Chart -->
+  <div class="stat-card curve-card">
+    <div class="stat-title">
+      Xác suất chạm Liq
+      <span style="float:right;color:var(--green);font-size:9px">▲ LONG</span>
+      <span style="float:right;color:var(--red);font-size:9px;margin-right:5px">▼ SHORT</span>
+    </div>
+    <div class="curve-chart-wrap">
+      <canvas id="curve-chart"></canvas>
+    </div>
+    <div class="curve-x-labels">
+      <span>+5m</span><span>+10m</span><span>+15m</span><span>+20m</span><span>+25m</span><span>+30m</span>
+    </div>
+  </div>
 
   <div class="stat-card">
     <div class="stat-title">CVD 5m</div>
@@ -167,10 +198,10 @@
   <button class="alert-close" onclick="document.getElementById('alert-popup').classList.remove('show')">✕</button>
 </div>
 
-<script src="{% static 'js/chart.js' %}"></script>
-<script src="{% static 'js/signal.js' %}"></script>
-<script src="{% static 'js/trades.js' %}"></script>
-<script src="{% static 'js/app.js' %}"></script>
+<script src="{% static 'js/chart.js' %}?v=2"></script>
+<script src="{% static 'js/signal.js' %}?v=2"></script>
+<script src="{% static 'js/trades.js' %}?v=2"></script>
+<script src="{% static 'js/app.js' %}?v=2"></script>
 
 </body>
 </html>

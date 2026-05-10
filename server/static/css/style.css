@@ -16,13 +16,19 @@
   --liq-down: #3fb950;
 }
 
-html, body {
+html {
+  height: 100%;
+}
+
+body {
   background: var(--bg);
   color: var(--text);
   font-family: 'Segoe UI', 'SF Pro', system-ui, monospace;
   font-size: 13px;
   height: 100%;
-  overflow-x: hidden;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ── Header ───────────────────────────────────────────── */
@@ -91,8 +97,8 @@ html, body {
   grid-template-columns: 1fr 280px;
   gap: 1px;
   background: var(--border);
-  height: calc(100vh - 44px - 100px - 130px - 200px);
-  min-height: 320px;
+  flex: 1;
+  min-height: 0;
 }
 
 .chart-section {
@@ -100,11 +106,12 @@ html, body {
   display: flex;
   flex-direction: column;
   padding: 8px 0 0;
+  overflow: hidden;
 }
 
 #chart {
   flex: 1;
-  min-height: 280px;
+  min-height: 0;
 }
 
 /* ── Signal Panel ─────────────────────────────────────── */
@@ -113,7 +120,8 @@ html, body {
   padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
+  overflow: hidden;
 }
 
 .section-title {
@@ -161,6 +169,15 @@ html, body {
 .prob-bar.signal {
   background: linear-gradient(90deg, #3fb950, #56d364);
 }
+.prob-bar-short {
+  background: linear-gradient(90deg, #6e1a18, #c0392b, #f85149);
+}
+.prob-bar-short.high {
+  background: linear-gradient(90deg, #b91c1c, #ef4444, #fca5a5);
+}
+.prob-bar-short.signal {
+  background: linear-gradient(90deg, #f85149, #ff6b6b);
+}
 
 .prob-value {
   font-size: 22px;
@@ -168,6 +185,25 @@ html, body {
   font-variant-numeric: tabular-nums;
   color: #fff;
   text-align: right;
+}
+
+/* Prob Curve Chart */
+.curve-card { min-width: 0; }
+
+.curve-chart-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  max-height: 95px;
+  overflow: hidden;
+}
+
+.curve-x-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  color: var(--muted);
+  padding: 2px 2px 0;
 }
 
 .signal-divider { border-top: 1px solid var(--border); margin: 4px 0; }
@@ -206,10 +242,11 @@ html, body {
 /* ── Stats Row ────────────────────────────────────────── */
 .stats-row {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: 1.6fr 1fr 1fr 1fr;
   gap: 1px;
   background: var(--border);
-  height: 120px;
+  height: 150px;
+  flex-shrink: 0;
 }
 
 .stat-card {
@@ -294,12 +331,13 @@ html, body {
 .trades-section {
   background: var(--surface);
   border-top: 1px solid var(--border);
-  min-height: 180px;
+  flex-shrink: 0;
+  height: 155px;
 }
 
 .trades-section .section-title { padding: 8px 14px 6px; border-bottom: 1px solid var(--border); }
 
-.table-wrap { overflow-x: auto; max-height: 170px; overflow-y: auto; }
+.table-wrap { overflow-x: auto; max-height: 120px; overflow-y: auto; }
 
 .trades-table {
   width: 100%;

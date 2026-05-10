@@ -8,7 +8,9 @@ PIP     := .venv/bin/pip
 MANAGE  := $(PYTHON) server/manage.py
 
 .PHONY: help setup venv install fake-data train server \
-        collector features signal test lint clean
+        collector features signal \
+        docker-up docker-down docker-logs docker-build \
+        test lint clean
 
 # ── Default ──────────────────────────────────────────────────────
 help:
@@ -26,6 +28,11 @@ help:
 	@echo "  make collector    Chạy data collector (Binance WS)"
 	@echo "  make features     Chạy feature engine"
 	@echo "  make signal       Chạy signal engine"
+	@echo ""
+	@echo "  make docker-up    Chạy toàn bộ project qua Docker"
+	@echo "  make docker-down  Tắt Docker"
+	@echo "  make docker-logs  Xem log Docker"
+	@echo "  make docker-build Rebuild Docker image"
 	@echo ""
 	@echo "  make test         Chạy test suite"
 	@echo "  make lint         Kiểm tra code style"
@@ -57,6 +64,9 @@ fake-data:
 train:
 	$(PYTHON) ml/train.py
 
+auto-train:
+	$(PYTHON) ml/auto_train.py
+
 # ── Services ─────────────────────────────────────────────────────
 server:
 	cd server && $(abspath $(PYTHON)) manage.py runserver 0.0.0.0:8000
@@ -69,6 +79,19 @@ features:
 
 signal:
 	$(PYTHON) signal/run.py
+
+# ── Docker ───────────────────────────────────────────────────────
+docker-up:
+	docker compose -f docker/docker-compose.yml up
+
+docker-down:
+	docker compose -f docker/docker-compose.yml down
+
+docker-logs:
+	docker compose -f docker/docker-compose.yml logs -f
+
+docker-build:
+	docker compose -f docker/docker-compose.yml up --build
 
 # ── Tests ────────────────────────────────────────────────────────
 test:

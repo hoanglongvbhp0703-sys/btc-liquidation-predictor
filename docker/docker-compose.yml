@@ -3,16 +3,20 @@ version: "3.9"
 # ══════════════════════════════════════════════════════════════════
 #  BTC Liquidation Predictor — Docker Compose
 #  Usage:
-#    docker compose up -d               # start all
-#    docker compose up dashboard        # chỉ dashboard
-#    docker compose logs -f collector   # xem log
+#    docker compose -f docker/docker-compose.yml up -d          # start all
+#    docker compose -f docker/docker-compose.yml up dashboard   # chỉ dashboard
+#    docker compose -f docker/docker-compose.yml logs -f        # xem log
+#    docker compose -f docker/docker-compose.yml down           # tắt
 # ══════════════════════════════════════════════════════════════════
 
 x-common: &common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
   restart: unless-stopped
   env_file: ../.env
   volumes:
-    - ../data:/app/data            # shared data volume
+    - ../data:/app/data
     - ../ml/artifacts:/app/ml/artifacts
 
 services:
@@ -20,46 +24,29 @@ services:
   # ── Layer 1: Data Collector ───────────────────────────────────
   collector:
     <<: *common
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.collector
     container_name: btc_collector
-    volumes:
-      - ../data/raw:/app/data/raw
+    command: python collector/main.py
 
-  # ── Layer 2+3: Feature Engine ────────────────────────────────
+  # ── Layer 2+3: Feature Engine ─────────────────────────────────
   feature_engine:
     <<: *common
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.feature
     container_name: btc_feature
+    command: python feature_engine/run.py
     depends_on: [collector]
-    volumes:
-      - ../data:/app/data
 
   # ── Layer 5: Signal Engine ────────────────────────────────────
   signal:
     <<: *common
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.signal
     container_name: btc_signal
+    command: python signal/run.py
     depends_on: [feature_engine]
-    volumes:
-      - ../data:/app/data
-      - ../ml/artifacts:/app/ml/artifacts
 
   # ── Layer 6: Dashboard ────────────────────────────────────────
   dashboard:
     <<: *common
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.dashboard
     container_name: btc_dashboard
+    working_dir: /app/server
+    command: daphne -b 0.0.0.0 -p 8000 btc_dashboard.asgi:application
     ports:
       - "8000:8000"
     depends_on: [collector]
-    volumes:
-      - ../data:/app/data
-      - ../ml/artifacts:/app/ml/artifacts

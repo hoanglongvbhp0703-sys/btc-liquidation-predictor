@@ -13,6 +13,7 @@ Cấu trúc thư mục output:
 """
 
 import csv
+import sys
 import time
 import traceback
 from pathlib import Path
@@ -20,10 +21,10 @@ from datetime import timezone, timedelta
 
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import FEATURES_FILE
 from build_features import build_feature_row, FEATURE_COLUMNS
 from label_builder import build_pending_labels
-
-FEATURES_FILE  = Path(__file__).parent.parent / "data" / "processed" / "features_5m.csv"
 RUN_INTERVAL   = 300  # 5 phút
 
 

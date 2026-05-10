@@ -1,23 +1,25 @@
 """
 broadcaster.py — Background thread: đọc data mỗi 1s → push WebSocket
 
-Khởi động từ DashboardConfig.ready().
-Dùng InMemoryChannelLayer để broadcast đến tất cả TickConsumer.
+Tick payload:
+  price, price_change_pct, liq_upper, liq_lower
+  prob_long, prob_short       — xác suất LONG / SHORT
+  signal_long, signal_short   — signal object nếu đủ điều kiện
+  prob (alias prob_long cho backward compat)
+  signal (alias signal_long cho backward compat)
 """
 
 import sys
 import time
 import json
-import math
-import random
 import threading
 from pathlib import Path
 
-ROOT_DIR  = Path(__file__).parent.parent.parent   # /home/coder
-MODEL_DIR = ROOT_DIR / "ml"
-MODEL_FILE = MODEL_DIR / "artifacts" / "lgb_model.pkl"
+ROOT_DIR   = Path(__file__).parent.parent.parent
+MODEL_DIR  = ROOT_DIR / "ml"
+MODEL_LONG = MODEL_DIR / "artifacts" / "lgb_model_long.pkl"
+MODEL_OLD  = MODEL_DIR / "artifacts" / "lgb_model.pkl"
 
-# Thêm ml/ vào sys.path để import predict.py
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 
@@ -26,32 +28,42 @@ from .data_reader import (
     read_active_signal,
 )
 
-_model_ctx     = None
-_model_mtime   = None
-_prev_price    = None
-_started       = False
-_lock          = threading.Lock()
+_model_ctx   = None
+_model_mtime = None
+_prev_price  = None
+_started     = False
+_lock        = threading.Lock()
+
+
+def _model_file_exists() -> bool:
+    return MODEL_LONG.exists() or MODEL_OLD.exists()
+
+
+def _current_model_mtime() -> float | None:
+    f = MODEL_LONG if MODEL_LONG.exists() else (MODEL_OLD if MODEL_OLD.exists() else None)
+    return f.stat().st_mtime if f else None
 
 
 def _try_load_model():
-    """Load hoặc reload model nếu file thay đổi."""
     global _model_ctx, _model_mtime
-    if not MODEL_FILE.exists():
+    if not _model_file_exists():
         return
     try:
-        mtime = MODEL_FILE.stat().st_mtime
+        mtime = _current_model_mtime()
         if mtime == _model_mtime:
             return
         import predict as _predict
         _model_ctx   = _predict.load_model()
         _model_mtime = mtime
-        print(f"[BC] Model loaded | AUC_test={_model_ctx['meta'].get('auc_test')}")
+        long_auc  = (_model_ctx["meta"].get("long") or {}).get("auc_test", "N/A")
+        short_auc = (_model_ctx["meta"].get("short") or {}).get("auc_test", "N/A")
+        has_short = _model_ctx.get("short") is not None
+        print(f"[BC] Model loaded | LONG auc={long_auc} | SHORT {'auc=' + str(short_auc) if has_short else 'N/A'}")
     except Exception as e:
         print(f"[BC] Model load error: {e}")
 
 
-def _compute_prob(feature_row: dict) -> float | None:
-    global _model_ctx
+def _compute_prob_long(feature_row: dict) -> float | None:
     if _model_ctx is None:
         return None
     try:
@@ -59,6 +71,76 @@ def _compute_prob(feature_row: dict) -> float | None:
         return round(_predict.predict_proba(_model_ctx, feature_row), 4)
     except Exception:
         return None
+
+
+def _compute_prob_short(feature_row: dict) -> float | None:
+    if _model_ctx is None or _model_ctx.get("short") is None:
+        return None
+    try:
+        import predict as _predict
+        prob = _predict.predict_proba_short(_model_ctx, feature_row)
+        return round(prob, 4) if prob is not None else None
+    except Exception:
+        return None
+
+
+def _compute_curve_long(feature_row: dict) -> dict | None:
+    if _model_ctx is None:
+        return None
+    try:
+        import predict as _predict
+        return _predict.predict_curve_long(_model_ctx, feature_row)
+    except Exception:
+        return None
+
+
+def _compute_curve_short(feature_row: dict) -> dict | None:
+    if _model_ctx is None:
+        return None
+    try:
+        import predict as _predict
+        return _predict.predict_curve_short(_model_ctx, feature_row)
+    except Exception:
+        return None
+
+
+def _compute_signal_long(feature_row: dict, price: float, upper, lower) -> dict | None:
+    if _model_ctx is None or price is None:
+        return None
+    try:
+        import predict as _predict
+        return _predict.predict_signal(_model_ctx, feature_row, price, upper, lower)
+    except Exception:
+        return None
+
+
+def _compute_signal_short(feature_row: dict, price: float, upper, lower) -> dict | None:
+    if _model_ctx is None or _model_ctx.get("short") is None or price is None:
+        return None
+    try:
+        import predict as _predict
+        return _predict.predict_signal_short(_model_ctx, feature_row, price, upper, lower)
+    except Exception:
+        return None
+
+
+def _sig_dict(signal: dict | None) -> dict | None:
+    if signal is None:
+        return None
+    def _f(v):
+        try:
+            return float(v) if v not in (None, "", "nan", "None") else None
+        except (TypeError, ValueError):
+            return None
+    return {
+        "signal":     signal.get("signal"),
+        "entry":      _f(signal.get("entry")),
+        "tp":         _f(signal.get("tp")),
+        "sl":         _f(signal.get("sl")),
+        "rr":         _f(signal.get("rr")),
+        "prob":       _f(signal.get("prob")),
+        "opened_at":  signal.get("opened_at", ""),
+    }
 
 
 def _build_tick() -> dict:
@@ -69,7 +151,6 @@ def _build_tick() -> dict:
 
     price = kline["close"] if kline else None
 
-    # % thay đổi giá so với tick trước
     price_change_pct = None
     if price is not None and _prev_price is not None and _prev_price != 0:
         price_change_pct = round((price - _prev_price) / _prev_price * 100, 4)
@@ -87,68 +168,67 @@ def _build_tick() -> dict:
 
     liq_upper = _f(feat, "liq_zone_upper")
     liq_lower = _f(feat, "liq_zone_lower")
-    dist_pct  = _f(feat, "dist_to_upper")
-    imbalance = _f(feat, "imbalance_now")
-    funding   = _f(feat, "funding_rate")
-    delta_oi  = _f(feat, "delta_oi_5m")
 
-    # CVD: thêm noise sin để sparkline trông live khi không có collector
-    cvd_base = _f(feat, "cvd_delta_5m") or 0.0
-    t = time.time()
-    cvd_5m = round(cvd_base + math.sin(t * 0.4) * 35 + math.sin(t * 0.13) * 15
-                   + random.gauss(0, 5), 2)
+    cvd_5m = round(_f(feat, "cvd_delta_5m") or 0.0, 2)
 
-    prob      = _compute_prob(feat) if feat else None
-    signal    = read_active_signal()
+    prob_long        = _compute_prob_long(feat)   if feat else None
+    prob_short       = _compute_prob_short(feat)  if feat else None
+    prob_curve_long  = _compute_curve_long(feat)  if feat else None
+    prob_curve_short = _compute_curve_short(feat) if feat else None
 
-    sig_out = None
-    if signal:
-        sig_out = {
-            "entry":      _f(signal, "entry"),
-            "tp":         _f(signal, "tp"),
-            "sl":         _f(signal, "sl"),
-            "rr":         _f(signal, "rr"),
-            "prob":       _f(signal, "prob"),
-            "opened_at":  signal.get("opened_at", ""),
-        }
+    # Signal LONG: ưu tiên paper trade đang mở (từ signal/run.py)
+    # Signal SHORT: tính real-time từ broadcaster
+    active_paper = read_active_signal()
+    if active_paper:
+        sig_long = _sig_dict({**active_paper, "signal": "LONG"})
+    else:
+        raw_long = _compute_signal_long(feat, price, liq_upper, liq_lower) if feat else None
+        sig_long = _sig_dict(raw_long)
+
+    raw_short = _compute_signal_short(feat, price, liq_upper, liq_lower) if feat else None
+    sig_short = _sig_dict(raw_short)
 
     return {
-        "ts":              kline["ts"] if kline else None,
-        "price":           price,
+        "ts":               kline["ts"] if kline else None,
+        "price":            price,
         "price_change_pct": price_change_pct,
-        "liq_upper":       liq_upper,
-        "liq_lower":       liq_lower,
-        "dist_upper_pct":  dist_pct,
-        "imbalance":       imbalance,
-        "cvd_5m":          cvd_5m,
-        "funding_rate":    funding,
-        "delta_oi_5m":     delta_oi,
-        "prob":            prob,
-        "signal":          sig_out,
+        "liq_upper":        liq_upper,
+        "liq_lower":        liq_lower,
+        "dist_upper_pct":   _f(feat, "dist_to_upper"),
+        "imbalance":        _f(feat, "imbalance_now"),
+        "cvd_5m":           cvd_5m,
+        "funding_rate":     _f(feat, "funding_rate"),
+        "delta_oi_5m":      _f(feat, "delta_oi_5m"),
+        "prob_long":        prob_long,
+        "prob_short":       prob_short,
+        "prob_curve_long":  prob_curve_long,
+        "prob_curve_short": prob_curve_short,
+        "signal_long":      sig_long,
+        "signal_short":     sig_short,
+        # backward compat
+        "prob":   prob_long,
+        "signal": sig_long,
     }
 
 
 def _broadcast_loop():
-    time.sleep(3)  # chờ Django khởi động xong
+    time.sleep(3)
 
     from asgiref.sync import async_to_sync
     from channels.layers import get_channel_layer
 
     channel_layer = get_channel_layer()
-
     print("[BC] Broadcaster started — pushing tick every 1s")
     reload_counter = 0
 
     while True:
         try:
-            # Reload model mỗi 60s
             reload_counter += 1
             if reload_counter >= 60:
                 _try_load_model()
                 reload_counter = 0
 
             tick = _build_tick()
-
             async_to_sync(channel_layer.group_send)(
                 "tick",
                 {"type": "tick.message", "data": tick},

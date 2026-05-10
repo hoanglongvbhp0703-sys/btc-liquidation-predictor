@@ -12,16 +12,12 @@ from datetime import timezone, timedelta
 
 import pandas as pd
 
-# Thêm root vào sys.path để import model/predict nếu cần
-ROOT_DIR      = Path(__file__).parent.parent.parent   # /home/coder
-RAW_DIR       = ROOT_DIR / "data" / "raw"
-PROCESSED_DIR = ROOT_DIR / "data" / "processed"
-
-KLINES_FILE   = RAW_DIR       / "klines_1s.csv"
-LIQ_FILE      = RAW_DIR       / "liquidations.csv"
-OB_FILE       = RAW_DIR       / "orderbook.csv"
-FEATURES_FILE = PROCESSED_DIR / "features_5m.csv"
-TRADES_FILE   = PROCESSED_DIR / "paper_trades.csv"
+ROOT_DIR = Path(__file__).parent.parent.parent   # /home/coder
+sys.path.insert(0, str(ROOT_DIR))
+from config import (
+    KLINES_FILE, LIQ_FILE, ORDERBOOK_FILE as OB_FILE,
+    FEATURES_FILE, PAPER_TRADES_FILE as TRADES_FILE,
+)
 
 KLINE_COLS = ["open_time", "open", "high", "low", "close",
               "volume", "taker_buy_vol", "num_trades"]

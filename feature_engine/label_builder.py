@@ -1,47 +1,54 @@
 """
 label_builder.py — Tầng 3: Xây dựng label cho features_5m.csv
 
-Logic:
-  Tại thời điểm T (đã có features):
-    label = 1  nếu max(high) trong [T, T+30m] >= liq_zone_upper
-    label = 0  nếu không
+Logic LONG (label_Xm):
+  label_Xm = 1  nếu max(high) trong [T, T+Xm] >= liq_zone_upper
+  label_Xm = 0  nếu không
 
-  Chỉ xử lý các row:
-    - label còn trống ("")
-    - timestamp <= now - 30 phút (đã đủ dữ liệu nhìn lại)
-    - liq_zone_upper không null
+Logic SHORT (label_short_Xm):
+  label_short_Xm = 1  nếu min(low) trong [T, T+Xm] <= liq_zone_lower
+  label_short_Xm = 0  nếu không
 
-Mã label đặc biệt:
-  -1 = liq_zone_upper là null/NaN (không thể label)
-  -2 = không đủ kline data trong cửa sổ 30p
+Alias backward compat:
+  label       = label_30m
+  label_short = label_short_30m
 
-Gọi từ run.py sau mỗi lần build_feature_row().
+Mã đặc biệt:
+  -1 = liq_zone_upper/lower là null/NaN
+  -2 = không đủ kline data trong cửa sổ
 """
 
 import pandas as pd
 from pathlib import Path
 from datetime import timedelta
 
-FEATURES_FILE = Path(__file__).parent.parent / "data" / "features_5m.csv"
-KLINES_FILE   = Path(__file__).parent.parent / "data" / "klines_1s.csv"
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import FEATURES_FILE, KLINES_FILE
 
-LABEL_DELAY = timedelta(minutes=30)
-MIN_KLINES  = 5   # ít nhất 5 kline rows trong cửa sổ 30 phút
+HORIZONS   = [5, 10, 15, 20, 25, 30]
+MIN_KLINES = 5
+
+
+def _label_col(direction: str, minutes: int) -> str:
+    """Tên cột label. label/label_short là alias cho 30m (backward compat)."""
+    if direction == "long":
+        return "label" if minutes == 30 else f"label_{minutes}m"
+    return "label_short" if minutes == 30 else f"label_short_{minutes}m"
+
+
+ALL_LABEL_COLS = [_label_col("long", h)  for h in HORIZONS] + \
+                 [_label_col("short", h) for h in HORIZONS]
 
 
 def _load_klines_for_range(t_start: pd.Timestamp, t_end: pd.Timestamp) -> pd.DataFrame:
-    """
-    Load klines_1s.csv chỉ trong khoảng [t_start, t_end].
-    Dùng usecols để chỉ đọc 2 cột cần thiết, tránh load toàn bộ file
-    khi klines_1s.csv đã có hàng triệu rows (30 ngày = ~2.5M rows).
-    """
     df = pd.read_csv(
         KLINES_FILE,
         names=["open_time", "open", "high", "low", "close",
                "volume", "taker_buy_vol", "num_trades"],
         header=0,
-        dtype={"high": float},
-        usecols=["open_time", "high"],
+        dtype={"high": float, "low": float},
+        usecols=["open_time", "high", "low"],
     )
     df["open_time"] = pd.to_datetime(
         df["open_time"], format="ISO8601", utc=True, errors="coerce"
@@ -50,21 +57,30 @@ def _load_klines_for_range(t_start: pd.Timestamp, t_end: pd.Timestamp) -> pd.Dat
     return df[(df["open_time"] >= t_start) & (df["open_time"] <= t_end)].reset_index(drop=True)
 
 
+def _is_pending(val) -> bool:
+    if val is None:
+        return True
+    if isinstance(val, float) and pd.isna(val):
+        return True
+    return str(val).strip() == ""
+
+
 def build_pending_labels() -> int:
-    """
-    Duyệt features_5m.csv, điền label cho các row đã đủ 30 phút.
-    Returns: số row được điền label (0 hoặc 1) trong lần chạy này.
-    """
     if not FEATURES_FILE.exists():
         print("[LB] features_5m.csv chưa tồn tại, bỏ qua.")
         return 0
 
-    df_feat = pd.read_csv(FEATURES_FILE, dtype={"label": str})
+    df_feat = pd.read_csv(FEATURES_FILE)
 
-    pending_mask = (
-        df_feat["label"].isna() |
-        (df_feat["label"].astype(str).str.strip() == "")
-    )
+    for col in ALL_LABEL_COLS:
+        if col not in df_feat.columns:
+            df_feat[col] = ""
+
+    # Xác định row nào còn pending bất kỳ horizon nào
+    pending_mask = pd.Series(False, index=df_feat.index)
+    for col in ALL_LABEL_COLS:
+        pending_mask |= df_feat[col].apply(_is_pending)
+
     pending_idx = df_feat[pending_mask].index.tolist()
 
     if not pending_idx:
@@ -75,8 +91,8 @@ def build_pending_labels() -> int:
         return 0
 
     now_utc = pd.Timestamp.now(tz="UTC")
+    max_delay = timedelta(minutes=max(HORIZONS))
 
-    # Tính range klines cần load — chỉ load đúng khoảng thời gian cần thiết
     ts_series = pd.to_datetime(
         df_feat.loc[pending_idx, "timestamp"], format="ISO8601", utc=True, errors="coerce"
     ).dropna()
@@ -84,13 +100,10 @@ def build_pending_labels() -> int:
     if ts_series.empty:
         return 0
 
-    kline_range_start = ts_series.min()
-    kline_range_end   = ts_series.max() + LABEL_DELAY
+    df_klines = _load_klines_for_range(ts_series.min(), ts_series.max() + max_delay)
 
-    df_klines = _load_klines_for_range(kline_range_start, kline_range_end)
-
-    labeled = 0
-    skipped = 0
+    labeled_30m = 0
+    skipped     = 0
 
     for idx in pending_idx:
         row = df_feat.loc[idx]
@@ -100,87 +113,129 @@ def build_pending_labels() -> int:
         except Exception:
             continue
 
-        t_end = t_start + LABEL_DELAY
-
-        if t_end > now_utc:
-            skipped += 1
-            continue
-
-        # liq_zone_upper null/NaN → không có ngưỡng
-        liq_zone_upper = row.get("liq_zone_upper")
+        # Liq zones
+        liq_upper_valid = False
+        liq_upper = None
         try:
-            liq_zone_upper = float(liq_zone_upper)
-            if pd.isna(liq_zone_upper):
-                raise ValueError("NaN")
+            liq_upper = float(row.get("liq_zone_upper"))
+            if not pd.isna(liq_upper):
+                liq_upper_valid = True
         except (TypeError, ValueError):
-            df_feat.at[idx, "label"] = -1
-            continue
+            pass
 
-        klines_window = df_klines[
+        liq_lower_valid = False
+        liq_lower = None
+        try:
+            liq_lower = float(row.get("liq_zone_lower"))
+            if not pd.isna(liq_lower):
+                liq_lower_valid = True
+        except (TypeError, ValueError):
+            pass
+
+        # Klines cho toàn bộ max horizon
+        klines_max = df_klines[
             (df_klines["open_time"] >= t_start) &
-            (df_klines["open_time"] <= t_end)
+            (df_klines["open_time"] <= t_start + max_delay)
         ]
 
-        if len(klines_window) < MIN_KLINES:
-            df_feat.at[idx, "label"] = -2
-            continue
+        row_skipped = True
 
-        max_high = float(klines_window["high"].max())
-        label    = 1 if max_high >= liq_zone_upper else 0
+        for h in HORIZONS:
+            t_end_h    = t_start + timedelta(minutes=h)
+            col_long   = _label_col("long",  h)
+            col_short  = _label_col("short", h)
+            need_long  = _is_pending(df_feat.at[idx, col_long])
+            need_short = _is_pending(df_feat.at[idx, col_short])
 
-        df_feat.at[idx, "label"] = label
-        labeled += 1
+            if not need_long and not need_short:
+                continue
 
-    if labeled > 0 or skipped < len(pending_idx):
-        df_feat.to_csv(FEATURES_FILE, index=False)
+            if t_end_h > now_utc:
+                skipped += 1
+                continue
 
-    total_labeled  = (df_feat["label"].astype(str).str.match(r"^[01]$")).sum()
-    total_positive = (df_feat["label"].astype(str) == "1").sum()
-    base_rate      = total_positive / total_labeled if total_labeled > 0 else 0.0
+            row_skipped = False
+            klines_h   = klines_max[klines_max["open_time"] <= t_end_h]
+            no_klines  = len(klines_h) < MIN_KLINES
+
+            if need_long:
+                if not liq_upper_valid:
+                    df_feat.at[idx, col_long] = -1
+                elif no_klines:
+                    df_feat.at[idx, col_long] = -2
+                else:
+                    max_high = float(klines_h["high"].max())
+                    df_feat.at[idx, col_long] = 1 if max_high >= liq_upper else 0
+                    if h == 30:
+                        labeled_30m += 1
+
+            if need_short:
+                if not liq_lower_valid:
+                    df_feat.at[idx, col_short] = -1
+                elif no_klines:
+                    df_feat.at[idx, col_short] = -2
+                else:
+                    min_low = float(klines_h["low"].min())
+                    df_feat.at[idx, col_short] = 1 if min_low <= liq_lower else 0
+
+    df_feat.to_csv(FEATURES_FILE, index=False)
+
+    def _stats(col):
+        s = df_feat[col].astype(str)
+        labeled  = s.str.match(r"^[01]$").sum()
+        positive = s.eq("1").sum()
+        return labeled, positive
+
+    long_labeled, long_pos = _stats("label")
+    short_labeled, short_pos = _stats("label_short")
+    long_br  = long_pos  / long_labeled  if long_labeled  > 0 else 0.0
+    short_br = short_pos / short_labeled if short_labeled > 0 else 0.0
 
     print(
-        f"[LB] Điền label: +{labeled} | "
-        f"Chưa đủ 30p: {skipped} | "
-        f"Tổng labeled: {total_labeled} | "
-        f"Base rate: {base_rate:.1%}"
+        f"[LB] LONG  +{labeled_30m} labeled (30m) | pending: {skipped} | "
+        f"total: {long_labeled} | base rate: {long_br:.1%}\n"
+        f"[LB] SHORT labeled: {short_labeled} | base rate: {short_br:.1%}"
     )
 
-    return labeled
+    return labeled_30m
 
 
 def label_summary() -> dict:
-    """Thống kê trạng thái label. Gọi thủ công để kiểm tra chất lượng data."""
     if not FEATURES_FILE.exists():
         return {}
 
-    df = pd.read_csv(FEATURES_FILE, dtype={"label": str})
-    lbl = df["label"].astype(str)
+    df = pd.read_csv(FEATURES_FILE)
 
-    total     = len(df)
-    labeled   = lbl.str.match(r"^[01]$").sum()
-    pending   = lbl.str.strip().eq("").sum()
-    positive  = lbl.eq("1").sum()
-    negative  = lbl.eq("0").sum()
-    no_zone   = lbl.eq("-1").sum()
-    no_klines = lbl.eq("-2").sum()
-    base_rate = positive / labeled if labeled > 0 else 0.0
+    def _stats(col):
+        if col not in df.columns:
+            return {}
+        s = df[col].astype(str)
+        labeled  = s.str.match(r"^[01]$").sum()
+        positive = s.eq("1").sum()
+        return {
+            "labeled":   int(labeled),
+            "positive":  int(positive),
+            "negative":  int(s.eq("0").sum()),
+            "base_rate": round(positive / labeled, 4) if labeled > 0 else 0.0,
+            "no_zone":   int(s.eq("-1").sum()),
+            "no_klines": int(s.eq("-2").sum()),
+        }
 
-    summary = {
-        "total_rows":  total,
-        "labeled":     int(labeled),
-        "pending":     int(pending),
-        "positive":    int(positive),
-        "negative":    int(negative),
-        "base_rate":   round(float(base_rate), 4),
-        "no_liq_zone": int(no_zone),
-        "no_klines":   int(no_klines),
-    }
-
+    summary = {"total_rows": len(df), "long": {}, "short": {}}
     print("\n── Label Summary ──────────────────────────")
-    for k, v in summary.items():
-        print(f"  {k:<14}: {v}")
-    print("──────────────────────────────────────────\n")
+    print(f"  total_rows : {summary['total_rows']}")
 
+    for direction in ("long", "short"):
+        print(f"\n  {direction.upper()}:")
+        for h in HORIZONS:
+            col = _label_col(direction, h)
+            st  = _stats(col)
+            summary[direction][f"{h}m"] = st
+            labeled  = st.get("labeled", 0)
+            base_rate = st.get("base_rate", 0.0)
+            print(f"    {h:>2}m  labeled={labeled:>5}  base_rate={base_rate:.1%}")
+
+    print("──────────────────────────────────────────\n")
     return summary
 
 

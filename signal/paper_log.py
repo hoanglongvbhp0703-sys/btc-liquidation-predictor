@@ -7,14 +7,14 @@ paper_trades.csv columns:
 """
 
 import csv
+import sys
 from pathlib import Path
 from datetime import timezone, timedelta
 
 import pandas as pd
 
-BASE_DIR          = Path(__file__).parent.parent
-PAPER_TRADES_FILE = BASE_DIR / "data" / "processed" / "paper_trades.csv"
-KLINES_FILE       = BASE_DIR / "data" / "raw"       / "klines_1s.csv"
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import PAPER_TRADES_FILE, KLINES_FILE
 
 OUTCOME_WINDOW = timedelta(minutes=30)
 

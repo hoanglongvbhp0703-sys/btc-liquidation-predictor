@@ -1,20 +1,22 @@
 import os
+import sys
 import csv
+import fcntl
 from pathlib import Path
 from datetime import datetime, timezone
 
-# ─── Cấu hình đường dẫn ──────────────────────────────────────
-# Cấu trúc: /root/collector/db.py → /root/data/
-DATA_DIR = Path(__file__).parent.parent / "data"
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import DATA_DIR, KLINES_FILE, LIQ_FILE, OI_FILE, FUNDING_FILE, ORDERBOOK_FILE, AGGTRADE_FILE
+
 DATA_DIR.mkdir(exist_ok=True)
 
 FILES = {
-    "klines":      DATA_DIR / "klines_1s.csv",
-    "liquidation": DATA_DIR / "liquidations.csv",
-    "oi":          DATA_DIR / "open_interest.csv",
-    "funding":     DATA_DIR / "funding_rate.csv",
-    "orderbook":   DATA_DIR / "orderbook.csv",
-    "aggtrade":    DATA_DIR / "aggtrades.csv",
+    "klines":      KLINES_FILE,
+    "liquidation": LIQ_FILE,
+    "oi":          OI_FILE,
+    "funding":     FUNDING_FILE,
+    "orderbook":   ORDERBOOK_FILE,
+    "aggtrade":    AGGTRADE_FILE,
 }
 
 # ─── Định nghĩa Header ───────────────────────────────────────
@@ -77,19 +79,23 @@ def init_csv_files():
         else:
             print(f"[CSV] File đã tồn tại: {filepath.name}")
 
-# ─── Ghi dữ liệu (flush + fsync ngay lập tức) ───────────────
+# ─── Ghi dữ liệu (flush + fsync + file lock) ────────────────
 def append_csv(key: str, row: list):
-    """Ghi 1 dòng vào CSV và ép hệ thống lưu xuống đĩa ngay lập tức."""
+    """Ghi 1 dòng vào CSV với exclusive lock để tránh race condition."""
     filepath = FILES[key]
     try:
         needs_header = not filepath.exists() or filepath.stat().st_size == 0
         with open(filepath, "a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            if needs_header:
-                writer.writerow(CSV_HEADERS[key])
-            writer.writerow(row)
-            f.flush()
-            os.fsync(f.fileno())
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                writer = csv.writer(f)
+                if needs_header:
+                    writer.writerow(CSV_HEADERS[key])
+                writer.writerow(row)
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
     except Exception as e:
         print(f"[CSV-ERROR] Không thể ghi file {key}: {e}")
 

@@ -24,11 +24,14 @@ import pickle
 import random
 import subprocess
 import sys
+import warnings
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
+
 ROOT_DIR      = Path(__file__).parent.parent
-DATA_DIR      = ROOT_DIR / "data" / "raw"         # raw CSVs (klines, liq...)
+DATA_DIR      = ROOT_DIR / "data"                  # raw CSVs (klines, liq...)
 PROCESSED_DIR = ROOT_DIR / "data" / "processed"   # features, paper_trades
 MODEL_DIR     = ROOT_DIR / "ml" / "artifacts"
 
@@ -474,10 +477,28 @@ def gen_features(candles_1m: list[dict], t0: datetime) -> list[dict]:
         w_sell_usd = round(abs(random.gauss(400_000, 200_000)), 2)
         w_dom = round(random.uniform(0.35, 0.75), 6)
 
-        # Label: 1 nếu giá có khả năng chạm upper zone trong 30 phút tới
-        # Heuristic: prob cao khi dist_up nhỏ + imbalance mua mạnh + cvd dương
-        score = (1 - dist_up * 30) * 0.4 + (imb_now - 0.5) * 0.4 + (cvd_delta / 300) * 0.2
-        label = 1 if score > 0.05 and random.random() < 0.45 else 0
+        # ── Multi-horizon labels ─────────────────────────────────────────
+        # Nếu chạm zone trong 30m thì ngẫu nhiên xác định "first touch horizon"
+        # Đảm bảo monotonicity: label_5m=1 → label_10m=1 → ... → label_30m=1
+
+        score_long  = (1 - dist_up * 30) * 0.4 + (imb_now - 0.5) * 0.4 + (cvd_delta / 300) * 0.2
+        label       = 1 if score_long  >  0.05 and random.random() < 0.40 else 0
+
+        if label == 1:
+            # First touch: phân bố thực tế (touch sớm hiếm hơn touch muộn)
+            touch_long = random.choices([5, 10, 15, 20, 25, 30],
+                                        weights=[6, 10, 18, 24, 22, 20])[0]
+        else:
+            touch_long = None
+
+        score_short = (1 - dist_lo * 30) * 0.4 + (0.5 - imb_now) * 0.4 + (-cvd_delta / 300) * 0.2
+        label_short = 1 if score_short > 0.05 and random.random() < 0.35 else 0
+
+        if label_short == 1:
+            touch_short = random.choices([5, 10, 15, 20, 25, 30],
+                                         weights=[6, 10, 18, 24, 22, 20])[0]
+        else:
+            touch_short = None
 
         ts = (t0 + timedelta(minutes=i)).isoformat()
 
@@ -529,6 +550,19 @@ def gen_features(candles_1m: list[dict], t0: datetime) -> list[dict]:
             "secs_to_next_funding": secs_next,
             "funding_urgency":    round(1 - secs_next / 28800, 4),
             "label":              label,
+            "label_short":        label_short,
+            # Horizon labels (LONG)
+            "label_5m":           1 if touch_long  is not None and touch_long  <=  5 else 0,
+            "label_10m":          1 if touch_long  is not None and touch_long  <= 10 else 0,
+            "label_15m":          1 if touch_long  is not None and touch_long  <= 15 else 0,
+            "label_20m":          1 if touch_long  is not None and touch_long  <= 20 else 0,
+            "label_25m":          1 if touch_long  is not None and touch_long  <= 25 else 0,
+            # Horizon labels (SHORT)
+            "label_short_5m":     1 if touch_short is not None and touch_short <=  5 else 0,
+            "label_short_10m":    1 if touch_short is not None and touch_short <= 10 else 0,
+            "label_short_15m":    1 if touch_short is not None and touch_short <= 15 else 0,
+            "label_short_20m":    1 if touch_short is not None and touch_short <= 20 else 0,
+            "label_short_25m":    1 if touch_short is not None and touch_short <= 25 else 0,
         })
 
         i += 5
@@ -606,29 +640,86 @@ def gen_trades(candles_1m: list[dict], t0: datetime, now: datetime) -> list[dict
 # 3. Model training
 # ══════════════════════════════════════════════════════════════════════════════
 
-def train_mock_model(features_file: Path, dry_run: bool):
-    """Train LightGBM thật trên fake features → lưu vào model/saved/."""
-    if dry_run:
-        print("  [DRY]  model training — skipped")
-        return
-
-    print("  [MODEL] Training LightGBM on fake data...")
+def _fit_one(df_all, label_col, available, direction):
+    """Train 1 model cho 1 hướng. Trả về (model, imputer, metrics) hoặc None."""
     import numpy as np
     import pandas as pd
     from lightgbm import LGBMClassifier, early_stopping, log_evaluation
     from sklearn.impute import SimpleImputer
     from sklearn.metrics import roc_auc_score
 
-    df = pd.read_csv(features_file)
-    df["label"] = pd.to_numeric(df["label"], errors="coerce")
-    df = df[df["label"].isin([0, 1])].copy()
-    df["label"] = df["label"].astype(int)
+    if label_col not in df_all.columns:
+        return None
 
-    if len(df) < 50:
-        print("  [MODEL] Không đủ data để train")
+    df = df_all.copy()
+    df[label_col] = pd.to_numeric(df[label_col], errors="coerce")
+    df = df[df[label_col].isin([0, 1])].copy()
+    df[label_col] = df[label_col].astype(int)
+
+    if len(df) < 30 or (df[label_col] == 1).sum() == 0:
+        print(f"  [MODEL] {direction}: không đủ data ({len(df)} rows, pos={(df[label_col]==1).sum()})")
+        return None
+
+    X = df[available].apply(pd.to_numeric, errors="coerce").fillna(0)
+    y = df[label_col].values
+
+    n_train = int(len(df) * 0.8)
+    n_val   = int(n_train * 0.15)
+    X_inner = X.iloc[:n_train - n_val];  y_inner = y[:n_train - n_val]
+    X_val   = X.iloc[n_train - n_val:n_train]; y_val = y[n_train - n_val:n_train]
+    X_test  = X.iloc[n_train:];          y_test  = y[n_train:]
+
+    imputer   = SimpleImputer(strategy="median")
+    Xi = imputer.fit_transform(X_inner)
+    Xv = imputer.transform(X_val)
+    Xt = imputer.transform(X_test)
+
+    spw = (y_inner == 0).sum() / max((y_inner == 1).sum(), 1)
+
+    model = LGBMClassifier(
+        n_estimators=300, num_leaves=15, learning_rate=0.05,
+        feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1,
+        min_child_samples=5, scale_pos_weight=spw,
+        random_state=42, verbose=-1, n_jobs=-1,
+    )
+    model.fit(Xi, y_inner, eval_set=[(Xv, y_val)],
+              callbacks=[early_stopping(20, verbose=False), log_evaluation(-1)])
+
+    pt = model.predict_proba(Xt)[:, 1]
+    pi = model.predict_proba(Xi)[:, 1]
+    auc_test  = round(float(roc_auc_score(y_test,  pt)), 4) if len(set(y_test))  > 1 else None
+    auc_train = round(float(roc_auc_score(y_inner, pi)), 4) if len(set(y_inner)) > 1 else None
+
+    print(f"  [MODEL] {direction}: AUC train={auc_train}  test={auc_test} | rows={len(df)} pos={(df[label_col]==1).sum()}")
+    return model, imputer, {
+        "n_train": int(len(X_inner)), "n_test": int(len(X_test)),
+        "auc_train": auc_train, "auc_test": auc_test,
+        "scale_pos_weight": round(float(spw), 4),
+        "best_iteration": int(model.best_iteration_) if model.best_iteration_ else None,
+        "feature_importance": {k: int(v) for k, v in
+                               sorted(zip(available, model.feature_importances_), key=lambda x: -x[1])},
+    }
+
+
+def _label_col(direction: str, minutes: int) -> str:
+    if direction == "long":
+        return "label" if minutes == 30 else f"label_{minutes}m"
+    return "label_short" if minutes == 30 else f"label_short_{minutes}m"
+
+
+HORIZONS = [5, 10, 15, 20, 25, 30]
+
+
+def train_mock_model(features_file: Path, dry_run: bool):
+    """Train 12 LightGBM models (6 horizons × LONG + SHORT) trên fake features."""
+    if dry_run:
+        print("  [DRY]  model training — skipped")
         return
 
-    # Boolean → int
+    print("  [MODEL] Training 12 LightGBM models (6 horizons × LONG/SHORT)...")
+    import pandas as pd
+
+    df = pd.read_csv(features_file)
     for col in ("funding_long_heavy", "funding_short_heavy"):
         if col in df.columns:
             df[col] = df[col].astype(str).map(
@@ -636,71 +727,50 @@ def train_mock_model(features_file: Path, dry_run: bool):
             ).astype(float)
 
     available = [c for c in FEATURE_COLS if c in df.columns]
-    X = df[available].apply(pd.to_numeric, errors="coerce").fillna(0)
-    y = df["label"].values
-
-    n_train = int(len(df) * 0.8)
-    n_val   = int(n_train * 0.15)
-    X_inner, X_val, X_test = X.iloc[:n_train - n_val], X.iloc[n_train - n_val:n_train], X.iloc[n_train:]
-    y_inner, y_val, y_test = y[:n_train - n_val], y[n_train - n_val:n_train], y[n_train:]
-
-    imputer   = SimpleImputer(strategy="median")
-    X_tr_imp  = imputer.fit_transform(X_inner)
-    X_val_imp = imputer.transform(X_val)
-    X_te_imp  = imputer.transform(X_test)
-
-    n_neg = (y_inner == 0).sum()
-    n_pos = (y_inner == 1).sum()
-    spw   = n_neg / n_pos if n_pos > 0 else 1.0
-
-    model = LGBMClassifier(
-        n_estimators=500, num_leaves=31, learning_rate=0.05,
-        feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1,
-        min_child_samples=20, scale_pos_weight=spw,
-        random_state=42, verbose=-1, n_jobs=-1,
-    )
-    model.fit(
-        X_tr_imp, y_inner,
-        eval_set=[(X_val_imp, y_val)],
-        callbacks=[early_stopping(30, verbose=False), log_evaluation(-1)],
-    )
-
-    probs_test  = model.predict_proba(X_te_imp)[:, 1]
-    probs_train = model.predict_proba(X_tr_imp)[:, 1]
-    auc_test  = roc_auc_score(y_test,  probs_test)  if len(set(y_test))  > 1 else 0.5
-    auc_train = roc_auc_score(y_inner, probs_train) if len(set(y_inner)) > 1 else 0.5
-
-    fi = dict(zip(available, model.feature_importances_))
-
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    with open(MODEL_DIR / "lgb_model.pkl", "wb") as f:
-        pickle.dump(model, f)
 
-    with open(MODEL_DIR / "imputer.pkl", "wb") as f:
-        pickle.dump(imputer, f)
+    all_metrics = {"long": {}, "short": {}}
+
+    for direction in ("long", "short"):
+        for h in HORIZONS:
+            lc  = _label_col(direction, h)
+            tag = f"{direction.upper()} {h}m"
+            res = _fit_one(df, lc, available, tag)
+            if not res:
+                continue
+            model, imputer, metrics = res
+            all_metrics[direction][f"{h}m"] = metrics
+
+            suffix = f"{direction}_{h}m"
+            with open(MODEL_DIR / f"lgb_model_{suffix}.pkl", "wb") as f: pickle.dump(model,   f)
+            with open(MODEL_DIR / f"imputer_{suffix}.pkl",   "wb") as f: pickle.dump(imputer, f)
+
+            # 30m backward compat
+            if h == 30:
+                with open(MODEL_DIR / f"lgb_model_{direction}.pkl", "wb") as f: pickle.dump(model,   f)
+                with open(MODEL_DIR / f"imputer_{direction}.pkl",   "wb") as f: pickle.dump(imputer, f)
+                if direction == "long":
+                    with open(MODEL_DIR / "lgb_model.pkl", "wb") as f: pickle.dump(model,   f)
+                    with open(MODEL_DIR / "imputer.pkl",   "wb") as f: pickle.dump(imputer, f)
+
+    long_30m  = all_metrics["long"].get("30m")
+    short_30m = all_metrics["short"].get("30m")
 
     meta = {
-        "model_type":        "LightGBM",
-        "feature_cols":      available,
-        "signal_threshold":  0.65,
-        "n_train":           int(len(X_inner)),
-        "n_test":            int(len(X_test)),
-        "auc_train":         round(float(auc_train), 4),
-        "auc_test":          round(float(auc_test), 4),
-        "precision_at_threshold": 0.0,
-        "recall_at_threshold":    0.0,
-        "f1_at_threshold":        0.0,
-        "n_signals_test":    0,
-        "scale_pos_weight":  round(float(spw), 4),
-        "best_iteration":    model.best_iteration_,
-        "trained_at":        datetime.now(tz=timezone.utc).isoformat(),
-        "feature_importance": {k: int(v) for k, v in sorted(fi.items(), key=lambda x: -x[1])},
+        "model_type":       "LightGBM",
+        "feature_cols":     available,
+        "signal_threshold": 0.65,
+        "trained_at":       datetime.now(tz=timezone.utc).isoformat(),
+        "horizons":         all_metrics,
+        "long":             long_30m,
+        "short":            short_30m,
+        **(long_30m or {}),
     }
-
     with open(MODEL_DIR / "meta.json", "w") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"  [MODEL] Done — AUC train={auc_train:.3f} test={auc_test:.3f} | {len(df)} rows")
+    n = sum(1 for d in all_metrics.values() for v in d.values() if v)
+    print(f"  [MODEL] Saved {n}/12 models → {MODEL_DIR}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -769,9 +839,13 @@ def main():
     if not args.features_only:
         write_csv(proc_dir / "paper_trades.csv", gen_trades(candles_1m, t0, now),        args.dry_run)
 
-    label_counts = {0: sum(1 for r in features if r["label"] == 0),
-                    1: sum(1 for r in features if r["label"] == 1)}
-    print(f"\n  features_5m labels: label=0 → {label_counts[0]}, label=1 → {label_counts[1]}")
+    print("\n  Label distribution (LONG / SHORT):")
+    for h in [5, 10, 15, 20, 25, 30]:
+        lc = "label" if h == 30 else f"label_{h}m"
+        sc = "label_short" if h == 30 else f"label_short_{h}m"
+        lp = sum(1 for r in features if r.get(lc) == 1)
+        sp = sum(1 for r in features if r.get(sc) == 1)
+        print(f"    {h:>2}m  LONG={lp:>3} ({lp/len(features)*100:4.1f}%)  SHORT={sp:>3} ({sp/len(features)*100:4.1f}%)")
 
     # 3. Train model
     if not args.no_model and not args.dry_run:

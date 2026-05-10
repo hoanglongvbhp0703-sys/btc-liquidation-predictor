@@ -33,10 +33,12 @@ aggtrades.csv:
   2026-05-04T03:51:23+00:00,3276342312,80206.80,0.747,59914.47960,False,0.747
 """
 
+import sys
 import pandas as pd
 from pathlib import Path
 
-DATA_DIR = Path(__file__).parent.parent / "data" / "raw"
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import DATA_DIR
 
 
 def _parse_dt(df: pd.DataFrame, col: str) -> pd.DataFrame:

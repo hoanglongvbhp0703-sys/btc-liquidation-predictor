@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 BASE_DIR  = Path(__file__).parent.parent        # /home/coder/server
@@ -5,9 +6,9 @@ ROOT_DIR  = BASE_DIR.parent                     # /home/coder
 DATA_DIR  = ROOT_DIR / "data"
 MODEL_DIR = ROOT_DIR / "model"
 
-SECRET_KEY = "btc-dashboard-dev-secret-key-change-in-prod"
-DEBUG      = True
-ALLOWED_HOSTS = ["*"]
+SECRET_KEY    = os.environ.get("DJANGO_SECRET_KEY", "btc-dashboard-dev-key-change-in-prod")
+DEBUG         = os.environ.get("DEBUG", "true").lower() == "true"
+ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "*").split(",")
 
 INSTALLED_APPS = [
     "daphne",
