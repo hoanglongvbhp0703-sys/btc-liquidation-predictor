@@ -50,25 +50,18 @@ def compute_oi_features(df_oi: pd.DataFrame) -> dict:
     oi_now     = float(latest["oi_btc"])
     oi_usd_now = float(latest["oi_usd"])
 
-    # ── delta 5 phút ───────────────────────────────────────
-    delta_oi_5m = _calc_delta(df, t_now, minutes=5, col="oi_btc")
-
-    # ── delta 30 phút ──────────────────────────────────────
+    delta_oi_1m  = _calc_delta(df, t_now, minutes=1,  col="oi_btc")
     delta_oi_30m = _calc_delta(df, t_now, minutes=30, col="oi_btc")
+    delta_oi_1h  = _calc_delta(df, t_now, minutes=60, col="oi_btc")
 
-    # ── delta 1 giờ ────────────────────────────────────────
-    delta_oi_1h = _calc_delta(df, t_now, minutes=60, col="oi_btc")
-
-    # ── acceleration: tốc độ thay đổi OI đang nhanh hay chậm ──
     oi_acceleration = None
-    if delta_oi_5m is not None and delta_oi_30m is not None:
-        # So sánh tốc độ 5m hiện tại vs tốc độ trung bình 30m
-        oi_acceleration = round(delta_oi_5m - (delta_oi_30m / 6), 8)
+    if delta_oi_1m is not None and delta_oi_30m is not None:
+        oi_acceleration = round(delta_oi_1m - (delta_oi_30m / 30), 8)
 
     return {
         "oi_now":          round(oi_now, 3),
         "oi_usd_now":      round(oi_usd_now, 2),
-        "delta_oi_5m":     round(delta_oi_5m,  8) if delta_oi_5m  is not None else None,
+        "delta_oi_1m":     round(delta_oi_1m,  8) if delta_oi_1m  is not None else None,
         "delta_oi_30m":    round(delta_oi_30m, 8) if delta_oi_30m is not None else None,
         "delta_oi_1h":     round(delta_oi_1h,  8) if delta_oi_1h  is not None else None,
         "oi_acceleration": oi_acceleration,
@@ -97,7 +90,7 @@ def _empty_oi_features() -> dict:
     return {
         "oi_now":          None,
         "oi_usd_now":      None,
-        "delta_oi_5m":     None,
+        "delta_oi_1m":     None,
         "delta_oi_30m":    None,
         "delta_oi_1h":     None,
         "oi_acceleration": None,

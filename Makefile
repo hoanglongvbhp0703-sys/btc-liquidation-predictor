@@ -7,7 +7,7 @@ PYTHON  := .venv/bin/python
 PIP     := .venv/bin/pip
 MANAGE  := $(PYTHON) server/manage.py
 
-.PHONY: help setup venv install fake-data train server \
+.PHONY: help setup venv install train server \
         collector features signal \
         docker-up docker-down docker-logs docker-build \
         test lint clean
@@ -21,7 +21,6 @@ help:
 	@echo "  make venv         Tạo virtual environment"
 	@echo "  make install      Cài tất cả dependencies"
 	@echo ""
-	@echo "  make fake-data    Sinh fake data + train model (dev)"
 	@echo "  make train        Train LightGBM với data thật"
 	@echo ""
 	@echo "  make server       Chạy dashboard (port 8000)"
@@ -41,7 +40,7 @@ help:
 
 # ── Setup ────────────────────────────────────────────────────────
 setup: venv install
-	@echo "✓ Setup xong. Chạy 'make fake-data' để tạo data demo."
+	@echo "✓ Setup xong. Chạy 'make collector && make features' để bắt đầu thu thập data."
 
 venv:
 	python3 -m venv .venv
@@ -57,10 +56,6 @@ install:
 	@echo "✓ Dependencies installed"
 
 # ── Data & Model ─────────────────────────────────────────────────
-fake-data:
-	$(PYTHON) scripts/generate_fake_data.py --hours 5
-	@echo "✓ Fake data + model ready. Chạy 'make server'."
-
 train:
 	$(PYTHON) ml/train.py
 
@@ -105,7 +100,7 @@ test-integration:
 
 # ── Code quality ─────────────────────────────────────────────────
 lint:
-	$(PYTHON) -m flake8 ml/ collector/ feature_engine/ signal/ server/ scripts/ \
+	$(PYTHON) -m flake8 ml/ collector/ feature_engine/ signal/ server/ \
 	    --max-line-length=100 --ignore=E501,W503
 
 # ── Cleanup ──────────────────────────────────────────────────────

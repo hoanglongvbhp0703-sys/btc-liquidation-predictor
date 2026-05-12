@@ -29,9 +29,40 @@ def count_labeled_rows() -> int:
     if not FEATURES_FILE.exists():
         return 0
     df = pd.read_csv(FEATURES_FILE)
-    if "label" not in df.columns:
+    col = "cascade_long_3m"
+    if col not in df.columns:
+        col = "label"
+    if col not in df.columns:
         return 0
-    return int(df["label"].isin([0, 1]).sum())
+    return int(pd.to_numeric(df[col], errors="coerce").isin([0, 1]).sum())
+
+
+def print_data_summary():
+    """In tóm tắt dữ liệu gần nhất dùng để train."""
+    if not FEATURES_FILE.exists():
+        print("[AUTO-TRAIN] features_5m.csv chưa tồn tại.", flush=True)
+        return
+    df = pd.read_csv(FEATURES_FILE)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
+
+    total     = len(df)
+    col       = "cascade_long_3m" if "cascade_long_3m" in df.columns else "label"
+    s         = pd.to_numeric(df[col], errors="coerce") if col in df.columns else pd.Series(dtype=float)
+    labeled   = s.isin([0, 1]).sum()
+    unlabeled = total - labeled
+    pos       = (s == 1).sum()
+    neg       = (s == 0).sum()
+    first_ts   = df["timestamp"].iloc[0].strftime("%Y-%m-%d %H:%M") if total > 0 else "N/A"
+    last_ts    = df["timestamp"].iloc[-1].strftime("%Y-%m-%d %H:%M") if total > 0 else "N/A"
+
+    print(f"[AUTO-TRAIN] ── Dữ liệu hiện tại ──────────────────────────", flush=True)
+    print(f"[AUTO-TRAIN]   Tổng rows    : {total}", flush=True)
+    print(f"[AUTO-TRAIN]   Đã labeled   : {labeled}  (pos={pos}, neg={neg})", flush=True)
+    print(f"[AUTO-TRAIN]   Chưa labeled : {unlabeled}  (chưa đủ 30 phút)", flush=True)
+    print(f"[AUTO-TRAIN]   Từ           : {first_ts} UTC", flush=True)
+    print(f"[AUTO-TRAIN]   Đến          : {last_ts} UTC", flush=True)
+    print(f"[AUTO-TRAIN] ────────────────────────────────────────────────", flush=True)
 
 
 def read_avg_auc() -> float | None:
@@ -82,7 +113,7 @@ def check_stable(history: dict) -> bool:
     recent = [r["auc"] for r in runs[-PATIENCE:]]
     best_prev = max(recent[:-1])
     latest = recent[-1]
-    no_improvement = (latest - best_prev) < MIN_DELTA
+    no_improvement = 0 <= (latest - best_prev) < MIN_DELTA
     if no_improvement:
         print(f"[AUTO-TRAIN] AUC {PATIENCE} lần gần nhất: {recent}", flush=True)
         print(f"[AUTO-TRAIN] Không cải thiện >= {MIN_DELTA} — model đã ổn định.", flush=True)
@@ -91,16 +122,14 @@ def check_stable(history: dict) -> bool:
 
 def main():
     history = load_history()
+    # Không dừng hẳn khi stable — tiếp tục train để cải thiện khi có thêm data
+    history["stable"] = False
+    save_history(history)
 
-    if history.get("stable"):
-        auc = history["runs"][-1].get("auc") if history["runs"] else "?"
-        print(f"[AUTO-TRAIN] Model đã ổn định (AUC={auc}). Không train thêm.", flush=True)
-        print(f"[AUTO-TRAIN] Xem lịch sử: {HISTORY_FILE}", flush=True)
-        return
-
-    print(f"[AUTO-TRAIN] Khởi động — check mỗi {INTERVAL//60} phút, dừng sau {PATIENCE} lần không cải thiện.", flush=True)
+    print(f"[AUTO-TRAIN] Khởi động — check mỗi {INTERVAL//60} phút.", flush=True)
 
     while True:
+        print_data_summary()
         n = count_labeled_rows()
         print(f"[AUTO-TRAIN] Labeled rows: {n}/{MIN_LABELED}", flush=True)
 
@@ -117,10 +146,7 @@ def main():
                 print(f"[AUTO-TRAIN] AUC trung bình: {auc}", flush=True)
 
                 if check_stable(history):
-                    history["stable"] = True
-                    save_history(history)
-                    print(f"[AUTO-TRAIN] Dừng auto-train. Model lưu tại ml/artifacts/", flush=True)
-                    return
+                    print(f"[AUTO-TRAIN] AUC ổn định — tiếp tục train để cải thiện với data mới.", flush=True)
 
                 save_history(history)
         else:

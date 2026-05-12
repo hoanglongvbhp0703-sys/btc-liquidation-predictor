@@ -1,16 +1,12 @@
 """
-predict.py — Load model và predict LONG + SHORT (dùng bởi Tầng 5 và broadcaster)
+predict.py — Cascade liquidation prediction
 
 API:
-    from ml.predict import load_model, predict_proba, predict_signal
-    from ml.predict import predict_proba_short, predict_signal_short
-    from ml.predict import predict_curve_long, predict_curve_short
-
-    ctx    = load_model()
-    prob_l = predict_proba(ctx, feature_row)           # LONG prob 30m
-    prob_s = predict_proba_short(ctx, feature_row)     # SHORT prob 30m
-    curve_l = predict_curve_long(ctx, feature_row)     # {5: p, 10: p, ..., 30: p}
-    curve_s = predict_curve_short(ctx, feature_row)    # {5: p, 10: p, ..., 30: p}
+    ctx = load_model()
+    prob = predict_cascade_prob(ctx, feature_row, "long")   # P(cascade trong 30m)
+    curve = predict_cascade_curve(ctx, feature_row, "long") # {5:p, 10:p, ..., 30:p}
+    minutes = predict_time_to_cascade(ctx, feature_row, "long")  # ước tính phút
+    signal = predict_cascade_signal(ctx, feature_row, price)     # dict | None
 """
 
 import json
@@ -27,8 +23,9 @@ BASE_DIR  = Path(__file__).parent
 SAVED_DIR = BASE_DIR / "artifacts"
 META_FILE = SAVED_DIR / "meta.json"
 
-HORIZONS = [5, 10, 15, 20, 25, 30]
-MIN_RR   = 1.5
+HORIZONS         = [1, 2, 3]
+CASCADE_TP_PCT   = 0.008   # +0.8%
+CASCADE_SL_PCT   = 0.005   # -0.5%
 
 
 def _load_artifact(model_file: Path, imputer_file: Path) -> dict | None:
@@ -42,11 +39,6 @@ def _load_artifact(model_file: Path, imputer_file: Path) -> dict | None:
 
 
 def load_model() -> dict:
-    """
-    Load tất cả LONG và SHORT models cho 6 horizons.
-    ctx["long"] / ctx["short"] = 30m model (backward compat).
-    ctx["long_curves"] / ctx["short_curves"] = {h: artifact} cho từng horizon.
-    """
     meta = {}
     if META_FILE.exists():
         with open(META_FILE) as f:
@@ -59,58 +51,42 @@ def load_model() -> dict:
     short_curves = {}
 
     for h in HORIZONS:
-        # LONG
-        lf = SAVED_DIR / f"lgb_model_long_{h}m.pkl"
-        li = SAVED_DIR / f"imputer_long_{h}m.pkl"
-        # fallback tên cũ cho 30m
-        if h == 30 and not lf.exists():
-            lf = SAVED_DIR / "lgb_model_long.pkl"
-            li = SAVED_DIR / "imputer_long.pkl"
-        long_curves[h] = _load_artifact(lf, li)
-
-        # SHORT
-        sf = SAVED_DIR / f"lgb_model_short_{h}m.pkl"
-        si = SAVED_DIR / f"imputer_short_{h}m.pkl"
-        if h == 30 and not sf.exists():
-            sf = SAVED_DIR / "lgb_model_short.pkl"
-            si = SAVED_DIR / "imputer_short.pkl"
-        short_curves[h] = _load_artifact(sf, si)
-
-    long_30m  = long_curves.get(30)
-    short_30m = short_curves.get(30)
-
-    # Thêm fallback lgb_model.pkl (legacy)
-    if long_30m is None:
-        long_30m = _load_artifact(SAVED_DIR / "lgb_model.pkl", SAVED_DIR / "imputer.pkl")
-        long_curves[30] = long_30m
-
-    if long_30m is None:
-        raise FileNotFoundError(
-            "Model chưa được train. Chạy: python ml/train.py\n"
-            "(Cần ít nhất 200 labeled rows trong features_5m.csv)"
+        long_curves[h] = _load_artifact(
+            SAVED_DIR / f"lgb_cascade_long_{h}m.pkl",
+            SAVED_DIR / f"imputer_cascade_long_{h}m.pkl",
+        )
+        short_curves[h] = _load_artifact(
+            SAVED_DIR / f"lgb_cascade_short_{h}m.pkl",
+            SAVED_DIR / f"imputer_cascade_short_{h}m.pkl",
         )
 
-    n_long  = sum(1 for v in long_curves.values()  if v is not None)
-    n_short = sum(1 for v in short_curves.values() if v is not None)
-    long_auc  = (meta.get("long")  or {}).get("auc_test", "N/A")
-    short_auc = (meta.get("short") or {}).get("auc_test", "N/A")
-    print(f"[PREDICT] Loaded LONG {n_long}/6 horizons (30m auc={long_auc}) | "
-          f"SHORT {n_short}/6 horizons (30m auc={short_auc})")
+    ttc_long  = None
+    ttc_short = None
+
+    # Cần ít nhất 3m model để hoạt động
+    if long_curves.get(3) is None:
+        raise FileNotFoundError(
+            "Model chưa được train. Chạy: python ml/train.py\n"
+            "(Cần ít nhất 200 labeled rows trong features_1m.csv)"
+        )
+
+    n_long  = sum(1 for v in long_curves.values()  if v)
+    n_short = sum(1 for v in short_curves.values() if v)
+    avg_auc = meta.get("avg_auc_test", "N/A")
+    print(f"[PREDICT] Loaded LONG {n_long}/3 | SHORT {n_short}/3 | avg_auc={avg_auc}")
 
     return {
-        # backward compat
-        "long":         {**long_30m,  "threshold": threshold},
-        "short":        {**short_30m, "threshold": threshold} if short_30m else None,
-        # curve models
         "long_curves":  long_curves,
         "short_curves": short_curves,
+        "ttc_long":     ttc_long,
+        "ttc_short":    ttc_short,
         "features":     features,
         "threshold":    threshold,
         "meta":         meta,
     }
 
 
-def _build_input(ctx: dict, feature_row: dict) -> pd.DataFrame:
+def _build_input(ctx: dict, feature_row: dict) -> np.ndarray:
     features   = ctx["features"]
     row_values = []
     for col in features:
@@ -127,33 +103,23 @@ def _build_input(ctx: dict, feature_row: dict) -> pd.DataFrame:
         else:
             val = np.nan if val is None else float(val)
         row_values.append(val)
-
-    return pd.DataFrame([row_values], columns=features, dtype=float)
-
-
-def predict_proba(ctx: dict, feature_row: dict) -> float:
-    """P(LONG label=1) — giá chạm Liq Upper trong 30m."""
-    sub = ctx["long"]
-    X   = _build_input(ctx, feature_row)
-    return float(sub["model"].predict_proba(sub["imputer"].transform(X))[0][1])
+    return np.array([row_values], dtype=float)
 
 
-def predict_proba_short(ctx: dict, feature_row: dict) -> float | None:
-    """P(SHORT label=1) — giá chạm Liq Lower trong 30m. None nếu chưa train."""
-    sub = ctx.get("short")
+def predict_cascade_prob(ctx: dict, feature_row: dict, direction: str) -> float | None:
+    """P(cascade trong 3m)."""
+    curves = ctx.get(f"{direction}_curves", {})
+    sub    = curves.get(3)
     if sub is None:
         return None
     X = _build_input(ctx, feature_row)
-    return float(sub["model"].predict_proba(sub["imputer"].transform(X))[0][1])
+    return round(float(sub["model"].predict_proba(sub["imputer"].transform(X))[0][1]), 4)
 
 
-def predict_curve_long(ctx: dict, feature_row: dict) -> dict:
-    """
-    Xác suất LONG chạm Liq Upper tại từng horizon.
-    Returns {5: prob, 10: prob, ..., 30: prob} — None nếu model chưa có.
-    """
+def predict_cascade_curve(ctx: dict, feature_row: dict, direction: str) -> dict:
+    """Xác suất cascade tại từng horizon. {5→p, 10→p, ..., 30→p}"""
+    curves = ctx.get(f"{direction}_curves", {})
     X      = _build_input(ctx, feature_row)
-    curves = ctx.get("long_curves", {})
     result = {}
     for h in HORIZONS:
         sub = curves.get(h)
@@ -164,104 +130,79 @@ def predict_curve_long(ctx: dict, feature_row: dict) -> dict:
     return result
 
 
-def predict_curve_short(ctx: dict, feature_row: dict) -> dict:
-    """
-    Xác suất SHORT chạm Liq Lower tại từng horizon.
-    Returns {5: prob, 10: prob, ..., 30: prob} — None nếu model chưa có.
-    """
-    X      = _build_input(ctx, feature_row)
-    curves = ctx.get("short_curves", {})
-    result = {}
+def predict_time_to_cascade(ctx: dict, feature_row: dict, direction: str) -> float | None:
+    """Ước tính phút đến cascade từ curve: horizon nhỏ nhất mà prob >= 0.50."""
+    curve = predict_cascade_curve(ctx, feature_row, direction)
     for h in HORIZONS:
-        sub = curves.get(h)
-        if sub is None:
-            result[h] = None
+        p = curve.get(h)
+        if p is not None and p >= 0.50:
+            return float(h)
+    return None
+
+
+def predict_cascade_signal(
+    ctx: dict,
+    feature_row: dict,
+    current_price: float,
+    max_ttc: float = 2.0,
+) -> dict | None:
+    """
+    Signal condition:
+      - cascade_prob_long >= threshold AND time_to_cascade_long <= max_ttc
+      - cascade_prob_short >= threshold AND time_to_cascade_short <= max_ttc
+    Ưu tiên LONG. Trả về signal dict hoặc None.
+    """
+    if current_price is None or current_price <= 0:
+        return None
+
+    threshold = ctx.get("threshold", 0.70)
+
+    for direction in ("long", "short"):
+        prob = predict_cascade_prob(ctx, feature_row, direction)
+        if prob is None or prob < threshold:
             continue
-        result[h] = round(float(sub["model"].predict_proba(sub["imputer"].transform(X))[0][1]), 4)
-    return result
 
+        ttc = predict_time_to_cascade(ctx, feature_row, direction)
+        if ttc is None or ttc > max_ttc:
+            continue
 
-def predict_signal(
-    ctx: dict,
-    feature_row: dict,
-    current_price: float,
-    liq_zone_upper: float | None,
-    liq_zone_lower: float | None,
-) -> dict | None:
-    if liq_zone_upper is None or liq_zone_lower is None:
-        return None
-    if current_price >= liq_zone_upper:
-        return None
+        if direction == "long":
+            tp  = round(current_price * (1 + CASCADE_TP_PCT), 2)
+            sl  = round(current_price * (1 - CASCADE_SL_PCT), 2)
+            sig = "CASCADE_LONG"
+        else:
+            tp  = round(current_price * (1 - CASCADE_TP_PCT), 2)
+            sl  = round(current_price * (1 + CASCADE_SL_PCT), 2)
+            sig = "CASCADE_SHORT"
 
-    prob = predict_proba(ctx, feature_row)
-    if prob < ctx["threshold"]:
-        return None
+        rr = CASCADE_TP_PCT / CASCADE_SL_PCT
 
-    tp = liq_zone_upper
-    sl = liq_zone_lower
-    rr = (tp - current_price) / (current_price - sl) if current_price > sl else 0.0
-    if rr < MIN_RR:
-        return None
+        return {
+            "signal":      sig,
+            "direction":   direction,
+            "prob":        round(prob, 4),
+            "entry":       round(current_price, 2),
+            "tp":          tp,
+            "sl":          sl,
+            "rr":          round(rr, 2),
+            "est_minutes": ttc,
+            "threshold":   threshold,
+        }
 
-    return {
-        "signal":    "LONG",
-        "prob":      round(prob, 4),
-        "entry":     round(current_price, 2),
-        "tp":        round(tp, 2),
-        "sl":        round(sl, 2),
-        "rr":        round(rr, 2),
-        "threshold": ctx["threshold"],
-    }
-
-
-def predict_signal_short(
-    ctx: dict,
-    feature_row: dict,
-    current_price: float,
-    liq_zone_upper: float | None,
-    liq_zone_lower: float | None,
-) -> dict | None:
-    if liq_zone_upper is None or liq_zone_lower is None:
-        return None
-    if current_price <= liq_zone_lower:
-        return None
-
-    prob = predict_proba_short(ctx, feature_row)
-    if prob is None or prob < ctx["threshold"]:
-        return None
-
-    tp = liq_zone_lower
-    sl = liq_zone_upper
-    rr = (current_price - tp) / (sl - current_price) if sl > current_price else 0.0
-    if rr < MIN_RR:
-        return None
-
-    return {
-        "signal":    "SHORT",
-        "prob":      round(prob, 4),
-        "entry":     round(current_price, 2),
-        "tp":        round(tp, 2),
-        "sl":        round(sl, 2),
-        "rr":        round(rr, 2),
-        "threshold": ctx["threshold"],
-    }
+    return None
 
 
 def model_info(ctx: dict) -> None:
     meta = ctx["meta"]
-    print("\n── Model Info ──────────────────────────────")
-    print(f"  Trained at : {meta.get('trained_at', 'N/A')}")
-    print(f"  Threshold  : {meta.get('signal_threshold')}")
-    horizons_meta = meta.get("horizons", {})
+    print("\n── Cascade Model Info ──────────────────────────────")
+    print(f"  Trained at  : {meta.get('trained_at', 'N/A')}")
+    print(f"  Avg AUC     : {meta.get('avg_auc_test', 'N/A')}")
+    print(f"  Threshold   : {meta.get('signal_threshold')}")
     for direction in ("long", "short"):
-        sub_ctx = ctx.get(direction)
-        status  = "✅" if sub_ctx else "❌ chưa train"
-        print(f"\n  {direction.upper()} {status}")
-        dir_meta = horizons_meta.get(direction, {})
-        for hm, hm_meta in dir_meta.items():
-            auc = hm_meta.get("auc_test", "N/A") if hm_meta else "N/A"
-            print(f"    {hm:>4}  AUC={auc}")
-    print("────────────────────────────────────────────\n")
+        n = sum(1 for v in ctx.get(f"{direction}_curves", {}).values() if v)
+        ttc = "✓" if ctx.get(f"ttc_{direction}") else "✗"
+        print(f"  {direction.upper():5}: {n}/6 horizon models | ttc={ttc}")
+    print("────────────────────────────────────────────────────\n")
 
 
 if __name__ == "__main__":

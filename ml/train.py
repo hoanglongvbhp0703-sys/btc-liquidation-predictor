@@ -1,16 +1,15 @@
 """
-train.py — Tầng 4: Train LightGBM models (6 horizons × LONG + SHORT = 12 models)
+train.py — Tầng 4: Train cascade liquidation models
 
-    python ml/train.py
+Model A (binary classification) — 12 models:
+  lgb_cascade_long_{h}m.pkl + lgb_cascade_short_{h}m.pkl (h ∈ {5,10,15,20,25,30})
+  Predict: P(cascade xảy ra trong hm tới)
 
-Output artifacts (ml/artifacts/):
-    lgb_model_long_5m.pkl  … lgb_model_long_30m.pkl
-    lgb_model_short_5m.pkl … lgb_model_short_30m.pkl
-    imputer_long_5m.pkl    … imputer_long_30m.pkl
-    imputer_short_5m.pkl   … imputer_short_30m.pkl
-    lgb_model_long.pkl     (alias → 30m, backward compat)
-    lgb_model_short.pkl    (alias → 30m, backward compat)
-    meta.json
+Model B (regression) — 2 models:
+  lgb_ttc_long.pkl, lgb_ttc_short.pkl
+  Predict: time_to_cascade (phút, 5-30), hay 35 nếu không có cascade trong 30m
+
+Output artifacts: ml/artifacts/
 """
 
 import json
@@ -19,32 +18,29 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from lightgbm import LGBMClassifier, early_stopping, log_evaluation
+from lightgbm import LGBMClassifier, LGBMRegressor, early_stopping, log_evaluation
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score
+from sklearn.metrics import roc_auc_score, precision_score, recall_score, mean_absolute_error
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import FEATURES_FILE, ML_DIR, HORIZONS, MIN_ROWS_TRAIN, SIGNAL_THRESHOLD
 
-BASE_DIR  = Path(__file__).parent
-SAVED_DIR = ML_DIR
-
-MIN_ROWS_TO_TRAIN  = MIN_ROWS_TRAIN
+SAVED_DIR          = ML_DIR
 TRAIN_RATIO        = 0.80
 VAL_RATIO_OF_TRAIN = 0.15
 
 FEATURE_COLS = [
-    "price_change_5m", "price_change_1m", "volatility_5m",
-    "volume_5m", "taker_buy_ratio",
-    "liq_long_usd_5m", "liq_short_usd_5m", "liq_total_5m", "liq_ratio_5m",
-    "dist_to_upper", "dist_to_lower",
+    "price_change_1m", "price_change_30s", "volatility_1m",
+    "volume_1m", "taker_buy_ratio",
+    "liq_long_usd_1m", "liq_short_usd_1m", "liq_total_1m", "liq_ratio_1m",
+    "liq_accel_30s",
     "imbalance_now", "imbalance_avg_1m", "imbalance_trend",
     "spread_now", "bid_vol_now", "ask_vol_now", "wall_ratio",
-    "cvd_delta_5m", "cvd_delta_1m",
+    "cvd_delta_1m", "cvd_delta_30s",
     "whale_buy_count", "whale_sell_count", "whale_net",
-    "whale_buy_usd_5m", "whale_sell_usd_5m", "whale_dominance",
-    "delta_oi_5m", "delta_oi_30m", "delta_oi_1h", "oi_acceleration",
+    "whale_buy_usd_1m", "whale_sell_usd_1m", "whale_dominance",
+    "delta_oi_1m", "delta_oi_30m", "delta_oi_1h", "oi_acceleration",
     "funding_rate", "funding_rate_abs", "funding_bias",
     "funding_long_heavy", "funding_short_heavy",
     "funding_rate_change", "funding_trend_3h",
@@ -52,17 +48,10 @@ FEATURE_COLS = [
 ]
 
 
-def _label_col(direction: str, minutes: int) -> str:
-    if direction == "long":
-        return "label" if minutes == 30 else f"label_{minutes}m"
-    return "label_short" if minutes == 30 else f"label_short_{minutes}m"
-
-
 def load_labeled_data() -> pd.DataFrame:
     df = pd.read_csv(FEATURES_FILE)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-    df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-    return df
+    return df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
 
 def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -82,10 +71,11 @@ def time_split(df: pd.DataFrame):
     return df.iloc[:n_train - n_val], df.iloc[n_train - n_val:n_train], df.iloc[n_train:]
 
 
-def _train_one(df_all: pd.DataFrame, label_col: str, direction: str, horizon: int) -> dict | None:
-    label_exists = label_col in df_all.columns
-    if not label_exists:
-        print(f"[TRAIN] {direction}/{horizon}m: cột '{label_col}' chưa có — bỏ qua.")
+# ── Model A: binary classifier ────────────────────────────────────
+
+def _train_classifier(df_all: pd.DataFrame, label_col: str, direction: str, horizon: int) -> dict | None:
+    if label_col not in df_all.columns:
+        print(f"[TRAIN-A] {direction}/{horizon}m: cột '{label_col}' chưa có — bỏ qua.")
         return None
 
     df = df_all.copy()
@@ -95,20 +85,17 @@ def _train_one(df_all: pd.DataFrame, label_col: str, direction: str, horizon: in
 
     n_total    = len(df)
     n_positive = (df[label_col] == 1).sum()
-    n_negative = (df[label_col] == 0).sum()
     pct1 = f"{n_positive/n_total*100:.1f}%" if n_total > 0 else "N/A"
 
-    print(f"\n[TRAIN] ── {direction.upper()} {horizon}m ─────────────────────────────────")
-    print(f"[TRAIN]   Labeled rows : {n_total}  (pos={n_positive} {pct1}, neg={n_negative})")
+    print(f"\n[TRAIN-A] ── cascade_{direction} {horizon}m ──────────────────────")
+    print(f"[TRAIN-A]   Rows: {n_total}  pos={n_positive} ({pct1})")
 
-    if n_total < MIN_ROWS_TO_TRAIN:
-        print(f"[TRAIN]   ❌ Cần ít nhất {MIN_ROWS_TO_TRAIN} rows. Bỏ qua.")
+    if n_total < MIN_ROWS_TRAIN:
+        print(f"[TRAIN-A]   Cần ít nhất {MIN_ROWS_TRAIN} rows. Bỏ qua.")
         return None
     if n_positive == 0:
-        print(f"[TRAIN]   ❌ Không có row label=1. Bỏ qua.")
+        print(f"[TRAIN-A]   Không có label=1. Bỏ qua.")
         return None
-    if n_total < 500:
-        print(f"[TRAIN]   ⚠️  Chỉ {n_total} rows — khuyến nghị 2000+.")
 
     df_inner, df_val, df_test = time_split(df)
 
@@ -119,29 +106,18 @@ def _train_one(df_all: pd.DataFrame, label_col: str, direction: str, horizon: in
     y_val   = df_val[label_col].values
     y_test  = df_test[label_col].values
 
-    print(f"[TRAIN]   Split: inner={len(X_inner)} val={len(X_val)} test={len(X_test)}")
-
     imputer     = SimpleImputer(strategy="median")
     X_inner_imp = imputer.fit_transform(X_inner)
     X_val_imp   = imputer.transform(X_val)
     X_test_imp  = imputer.transform(X_test)
 
-    n_neg = (y_inner == 0).sum()
-    n_pos = (y_inner == 1).sum()
-    spw   = n_neg / n_pos if n_pos > 0 else 1.0
+    spw = (y_inner == 0).sum() / max((y_inner == 1).sum(), 1)
 
     model = LGBMClassifier(
-        n_estimators=500,
-        num_leaves=31,
-        learning_rate=0.05,
-        feature_fraction=0.8,
-        bagging_fraction=0.8,
-        bagging_freq=1,
-        min_child_samples=20,
-        scale_pos_weight=spw,
-        random_state=42,
-        verbose=-1,
-        n_jobs=-1,
+        n_estimators=500, num_leaves=31, learning_rate=0.05,
+        feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1,
+        min_child_samples=20, scale_pos_weight=spw,
+        random_state=42, verbose=-1, n_jobs=-1,
     )
     model.fit(
         X_inner_imp, y_inner,
@@ -149,69 +125,106 @@ def _train_one(df_all: pd.DataFrame, label_col: str, direction: str, horizon: in
         callbacks=[early_stopping(30, verbose=False), log_evaluation(-1)],
     )
 
-    prob_train = model.predict_proba(X_inner_imp)[:, 1]
-    prob_test  = model.predict_proba(X_test_imp)[:, 1]
-
-    auc_train = roc_auc_score(y_inner, prob_train) if len(np.unique(y_inner)) > 1 else float("nan")
-    auc_test  = roc_auc_score(y_test,  prob_test)  if len(np.unique(y_test))  > 1 else float("nan")
+    prob_test = model.predict_proba(X_test_imp)[:, 1]
+    auc_test  = roc_auc_score(y_test, prob_test) if len(np.unique(y_test)) > 1 else float("nan")
 
     pred_test = (prob_test >= SIGNAL_THRESHOLD).astype(int)
     n_signals = int(pred_test.sum())
     prec = precision_score(y_test, pred_test, zero_division=0) if n_signals > 0 else 0.0
-    rec  = recall_score(y_test,  pred_test, zero_division=0) if n_signals > 0 else 0.0
-    f1   = f1_score(y_test,     pred_test, zero_division=0) if n_signals > 0 else 0.0
+    rec  = recall_score(y_test, pred_test, zero_division=0) if n_signals > 0 else 0.0
 
-    print(f"[TRAIN]   AUC train={auc_train:.4f}  test={auc_test:.4f}", end="")
-    if not (np.isnan(auc_train) or np.isnan(auc_test)) and auc_train - auc_test > 0.10:
-        print(f"  ⚠️  overfit gap={auc_train-auc_test:.3f}", end="")
-    print()
-    print(f"[TRAIN]   @{SIGNAL_THRESHOLD}: signals={n_signals}  prec={prec:.3f}  rec={rec:.3f}  f1={f1:.3f}")
+    print(f"[TRAIN-A]   AUC test={auc_test:.4f} | @{SIGNAL_THRESHOLD}: signals={n_signals} prec={prec:.3f} rec={rec:.3f}")
 
-    importance = model.feature_importances_
-    fi = sorted(zip(FEATURE_COLS, importance), key=lambda x: x[1], reverse=True)
-    print(f"[TRAIN]   Top 5 features:")
-    for feat, imp in fi[:5]:
-        print(f"    {feat:<30} {imp:>5.0f}")
-
-    # Lưu model chính (tên có horizon)
-    suffix       = f"{direction}_{horizon}m"
-    model_file   = SAVED_DIR / f"lgb_model_{suffix}.pkl"
+    suffix       = f"cascade_{direction}_{horizon}m"
+    model_file   = SAVED_DIR / f"lgb_{suffix}.pkl"
     imputer_file = SAVED_DIR / f"imputer_{suffix}.pkl"
     with open(model_file, "wb") as f:
         pickle.dump(model, f)
     with open(imputer_file, "wb") as f:
         pickle.dump(imputer, f)
 
-    # Backward compat: 30m → lgb_model_long.pkl / lgb_model_short.pkl
-    if horizon == 30:
-        compat_model   = SAVED_DIR / f"lgb_model_{direction}.pkl"
-        compat_imputer = SAVED_DIR / f"imputer_{direction}.pkl"
-        with open(compat_model, "wb") as f:
-            pickle.dump(model, f)
-        with open(compat_imputer, "wb") as f:
-            pickle.dump(imputer, f)
-
-    print(f"[TRAIN]   ✅ Saved → {model_file.name} ({model_file.stat().st_size // 1024} KB)")
+    print(f"[TRAIN-A]   Saved → {model_file.name}")
 
     return {
-        "n_train":                int(len(X_inner)),
-        "n_test":                 int(len(X_test)),
-        "auc_train":              round(float(auc_train), 4) if not np.isnan(auc_train) else None,
-        "auc_test":               round(float(auc_test),  4) if not np.isnan(auc_test)  else None,
-        "precision_at_threshold": round(float(prec), 4),
-        "recall_at_threshold":    round(float(rec),  4),
-        "f1_at_threshold":        round(float(f1),   4),
-        "n_signals_test":         n_signals,
-        "scale_pos_weight":       round(float(spw), 4),
-        "best_iteration":         int(model.best_iteration_) if model.best_iteration_ else None,
-        "feature_importance":     {f: int(i) for f, i in fi},
+        "n_train": int(len(X_inner)), "n_test": int(len(X_test)),
+        "auc_test": round(float(auc_test), 4) if not np.isnan(auc_test) else None,
+        "precision": round(float(prec), 4), "recall": round(float(rec), 4),
+        "n_signals_test": n_signals, "scale_pos_weight": round(float(spw), 4),
     }
 
+
+# ── Model B: regression ────────────────────────────────────────────
+
+def _train_regressor(df_all: pd.DataFrame, direction: str) -> dict | None:
+    ttc_col = f"time_to_cascade_{direction}"
+    if ttc_col not in df_all.columns:
+        print(f"[TRAIN-B] {ttc_col} chưa có — bỏ qua.")
+        return None
+
+    df = df_all.copy()
+    df[ttc_col] = pd.to_numeric(df[ttc_col], errors="coerce")
+    # NaN (no cascade) → NO_CASCADE_VALUE
+    df[ttc_col] = df[ttc_col].fillna(NO_CASCADE_VALUE)
+    df = df.dropna(subset=[ttc_col])
+
+    n_total    = len(df)
+    n_cascade  = (df[ttc_col] < NO_CASCADE_VALUE).sum()
+    print(f"\n[TRAIN-B] ── time_to_cascade_{direction} ──────────────────────")
+    print(f"[TRAIN-B]   Rows: {n_total} | with cascade: {n_cascade}")
+
+    if n_total < MIN_ROWS_TRAIN:
+        print(f"[TRAIN-B]   Cần ít nhất {MIN_ROWS_TRAIN} rows. Bỏ qua.")
+        return None
+    if n_cascade < 20:
+        print(f"[TRAIN-B]   Cần ít nhất 20 cascade rows. Bỏ qua.")
+        return None
+
+    df_inner, df_val, df_test = time_split(df)
+
+    X_inner = prepare_features(df_inner)
+    X_val   = prepare_features(df_val)
+    X_test  = prepare_features(df_test)
+    y_inner = df_inner[ttc_col].values
+    y_val   = df_val[ttc_col].values
+    y_test  = df_test[ttc_col].values
+
+    imputer     = SimpleImputer(strategy="median")
+    X_inner_imp = imputer.fit_transform(X_inner)
+    X_val_imp   = imputer.transform(X_val)
+    X_test_imp  = imputer.transform(X_test)
+
+    model = LGBMRegressor(
+        n_estimators=500, num_leaves=31, learning_rate=0.05,
+        feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1,
+        min_child_samples=20, random_state=42, verbose=-1, n_jobs=-1,
+    )
+    model.fit(
+        X_inner_imp, y_inner,
+        eval_set=[(X_val_imp, y_val)],
+        callbacks=[early_stopping(30, verbose=False), log_evaluation(-1)],
+    )
+
+    pred_test = model.predict(X_test_imp)
+    mae = mean_absolute_error(y_test, pred_test)
+    print(f"[TRAIN-B]   MAE={mae:.2f}m")
+
+    model_file   = SAVED_DIR / f"lgb_ttc_{direction}.pkl"
+    imputer_file = SAVED_DIR / f"imputer_ttc_{direction}.pkl"
+    with open(model_file, "wb") as f:
+        pickle.dump(model, f)
+    with open(imputer_file, "wb") as f:
+        pickle.dump(imputer, f)
+
+    print(f"[TRAIN-B]   Saved → {model_file.name}")
+    return {"n_train": int(len(X_inner)), "n_test": int(len(X_test)), "mae": round(float(mae), 2)}
+
+
+# ── Main ──────────────────────────────────────────────────────────
 
 def train():
     SAVED_DIR.mkdir(exist_ok=True)
 
-    print("[TRAIN] Đọc features_5m.csv...")
+    print("[TRAIN] Đọc features_1m.csv...")
     df = load_labeled_data()
     print(f"[TRAIN] Total rows: {len(df)}")
 
@@ -219,38 +232,45 @@ def train():
 
     for direction in ("long", "short"):
         for h in HORIZONS:
-            lc = _label_col(direction, h)
+            lc = f"cascade_{direction}_{h}m"
             try:
-                metrics = _train_one(df, lc, direction, h)
-                if metrics:
-                    all_metrics[direction][f"{h}m"] = metrics
+                m = _train_classifier(df, lc, direction, h)
+                if m:
+                    all_metrics[direction][f"{h}m"] = m
             except Exception as e:
-                print(f"[TRAIN] ❌ {direction}/{h}m thất bại: {e}")
+                print(f"[TRAIN-A] {direction}/{h}m lỗi: {e}")
 
-    long_30m  = all_metrics["long"].get("30m")
-    short_30m = all_metrics["short"].get("30m")
+    trained_a = sum(1 for d in ("long", "short") for v in all_metrics[d].values() if v)
 
-    if not any(all_metrics["long"].values()) and not any(all_metrics["short"].values()):
+    if trained_a == 0:
+        print("[TRAIN] Không có model nào được train.")
         return
 
+    # Tính avg AUC cho meta
+    aucs = [
+        v["auc_test"]
+        for d in ("long", "short")
+        for v in all_metrics[d].values()
+        if v and v.get("auc_test") is not None
+    ]
+    avg_auc = round(sum(aucs) / len(aucs), 4) if aucs else None
+
     meta = {
-        "model_type":       "LightGBM",
+        "model_type":       "LightGBM cascade",
         "feature_cols":     FEATURE_COLS,
         "signal_threshold": SIGNAL_THRESHOLD,
         "trained_at":       pd.Timestamp.now(tz="UTC").isoformat(),
+        "avg_auc_test":     avg_auc,
         "horizons":         all_metrics,
-        # backward compat: long/short = 30m metrics
-        "long":             long_30m,
-        "short":            short_30m,
-        **(long_30m or {}),
+        # backward compat — auc_test dùng bởi auto_train.py
+        "auc_test":         avg_auc,
     }
 
     with open(SAVED_DIR / "meta.json", "w") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"\n[TRAIN] ✅ meta.json saved → {SAVED_DIR}/meta.json")
-    trained = sum(1 for d in all_metrics.values() for v in d.values() if v)
-    print(f"[TRAIN] ✅ Trained {trained}/12 models")
+    print(f"\n[TRAIN] Models: {trained_a}/6 | avg AUC={avg_auc}")
+    print(f"[TRAIN] meta.json saved → {SAVED_DIR}/meta.json")
 
 
 if __name__ == "__main__":

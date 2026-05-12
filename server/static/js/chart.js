@@ -1,7 +1,7 @@
-// chart.js — Lightweight Charts: nến 1m + liq zone lines + liq event markers + click tooltip
+// chart.js — Lightweight Charts: nến + liq zone lines + liq markers + click tooltip
 
 const ChartModule = (() => {
-  let _chart, _candleSeries, _upperLine, _lowerLine;
+  let _chart, _candleSeries;
   let _lastBar      = null;
   let _currentMinute = null;
   let _liqData      = [];   // raw liq events cho click lookup
@@ -28,6 +28,8 @@ const ChartModule = (() => {
         borderColor:    '#21262d',
         timeVisible:    true,
         secondsVisible: false,
+        barSpacing:     6,
+        minBarSpacing:  3,
       },
       handleScroll: true,
       handleScale:  true,
@@ -40,21 +42,6 @@ const ChartModule = (() => {
       borderDownColor: '#f85149',
       wickUpColor:     '#3fb950',
       wickDownColor:   '#f85149',
-    });
-
-    _upperLine = _chart.addLineSeries({
-      color:            '#f85149',
-      lineWidth:        1,
-      lineStyle:        LightweightCharts.LineStyle.Dashed,
-      priceLineVisible: false,
-      lastValueVisible: false,
-    });
-    _lowerLine = _chart.addLineSeries({
-      color:            '#3fb950',
-      lineWidth:        1,
-      lineStyle:        LightweightCharts.LineStyle.Dashed,
-      priceLineVisible: false,
-      lastValueVisible: false,
     });
 
     // Tạo tooltip DOM
@@ -139,6 +126,8 @@ const ChartModule = (() => {
     if (_tooltip) _tooltip.style.display = 'none';
   }
 
+  let _historyStart = null;  // Unix seconds của nến đầu tiên
+
   function loadHistory(klines) {
     if (!klines || klines.length === 0) return;
 
@@ -152,24 +141,18 @@ const ChartModule = (() => {
     bars.sort((a, b) => a.time - b.time);
     _candleSeries.setData(bars);
 
-    if (bars.length > 0) {
-      _lastBar       = { ...bars[bars.length - 1] };
-      _currentMinute = bars[bars.length - 1].time;
-    }
-    _chart.timeScale().scrollToRealTime();
-  }
+    _historyStart  = bars[0].time;
+    _lastBar       = { ...bars[bars.length - 1] };
+    _currentMinute = bars[bars.length - 1].time;
 
-  function updateZones(upper, lower) {
-    if (!upper && !lower) return;
-    const now  = Math.floor(Date.now() / 1000);
-    const past = now - 4 * 3600;
+    // Cập nhật label timeframe
+    const tfLabel = document.getElementById('tf-label');
+    if (tfLabel && klines[0] && klines[0].tf) {
+      const tfMap = { '1min': '1M', '5min': '5M', '15min': '15M' };
+      tfLabel.textContent = tfMap[klines[0].tf] || klines[0].tf;
+    }
 
-    if (upper) {
-      _upperLine.setData([{ time: past, value: upper }, { time: now, value: upper }]);
-    }
-    if (lower) {
-      _lowerLine.setData([{ time: past, value: lower }, { time: now, value: lower }]);
-    }
+    _chart.timeScale().fitContent();
   }
 
   function updateTick(tick) {
@@ -196,19 +179,32 @@ const ChartModule = (() => {
   function addLiqMarkers(liqs) {
     if (!liqs || liqs.length === 0) return;
 
-    _liqData = liqs; // lưu lại để click lookup
+    _liqData = liqs;
 
-    const markers = liqs.map(l => ({
-      time:     Math.floor(new Date(l.ts).getTime() / 1000),
-      position: l.side === 'BUY' ? 'belowBar' : 'aboveBar',
-      color:    l.side === 'BUY' ? '#3fb950' : '#f85149',
-      shape:    'circle',
-      size:     Math.min(3, Math.max(1, Math.log10(l.usd_value / 10000))),
-      text:     '',
-    }));
+    // Gộp theo phút (trùng timestamp trong cùng 1 phút → lấy USD lớn nhất)
+    const buckets = {};
+    for (const l of liqs) {
+      const tMin = Math.floor(new Date(l.ts).getTime() / 60000) * 60;
+      const key  = `${tMin}_${l.side}`;
+      if (!buckets[key] || l.usd_value > buckets[key].usd) {
+        buckets[key] = { time: tMin, side: l.side, usd: l.usd_value, ts: l.ts };
+      }
+    }
+
+    const markers = Object.values(buckets).map(b => {
+      const isLong = b.side === 'SELL'; // SELL = long bị quét → đỏ, từ trên xuống
+      return {
+        time:     b.time,
+        position: isLong ? 'aboveBar' : 'belowBar',
+        color:    isLong ? '#f85149' : '#3fb950',
+        shape:    'circle',
+        size:     b.usd >= 500000 ? 1.2 : b.usd >= 100000 ? 0.7 : 0.3,
+        text:     '',
+      };
+    });
     markers.sort((a, b) => a.time - b.time);
     _candleSeries.setMarkers(markers);
   }
 
-  return { init, loadHistory, updateZones, updateTick, addLiqMarkers };
+  return { init, loadHistory, updateTick, addLiqMarkers };
 })();

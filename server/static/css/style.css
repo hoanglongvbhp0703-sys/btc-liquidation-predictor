@@ -70,17 +70,6 @@ body {
 .change.down    { color: var(--red);   background: rgba(248,81,73,.15); }
 .change.neutral { color: var(--muted); }
 
-.header-center {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-}
-.label  { color: var(--muted); }
-.sep    { color: var(--border); }
-.liq-upper { color: var(--liq-up);   font-weight: 600; font-variant-numeric: tabular-nums; }
-.liq-lower { color: var(--liq-down); font-weight: 600; font-variant-numeric: tabular-nums; }
-
 .header-right { display: flex; align-items: center; gap: 6px; }
 .live-dot  { font-size: 10px; color: var(--green); animation: pulse 2s infinite; }
 .live-dot.disconnected { color: var(--red); animation: none; }
@@ -141,12 +130,34 @@ body {
   font-size: 11px;
   color: var(--muted);
   margin-bottom: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
-.prob-window {
-  background: var(--border);
-  padding: 1px 4px;
-  border-radius: 3px;
+.prob-sub {
   font-size: 10px;
+  color: var(--muted);
+  opacity: 0.7;
+}
+.prob-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-top: 2px;
+}
+
+/* TTC badge */
+.ttc-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--border);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.ttc-badge.ttc-urgent {
+  color: var(--yellow);
+  background: rgba(227,179,65,.15);
 }
 
 .prob-bar-wrap {

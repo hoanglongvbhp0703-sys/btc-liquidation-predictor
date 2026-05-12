@@ -22,10 +22,10 @@ from datetime import timezone, timedelta
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import FEATURES_FILE
+from config import FEATURES_FILE, RUN_INTERVAL_FE
 from build_features import build_feature_row, FEATURE_COLUMNS
 from label_builder import build_pending_labels
-RUN_INTERVAL   = 300  # 5 phút
+RUN_INTERVAL = RUN_INTERVAL_FE  # 1 phút
 
 
 def init_features_file():
@@ -49,7 +49,7 @@ def append_feature_row(row: dict):
 
 def run_once():
     """Chạy 1 lần: tính features + điền labels."""
-    now = pd.Timestamp.now(tz="UTC").floor("5min")  # làm tròn xuống 5 phút
+    now = pd.Timestamp.now(tz="UTC").floor("1min")
 
     print(f"\n[FE] ── {now.strftime('%Y-%m-%d %H:%M')} UTC ──")
 
@@ -80,7 +80,7 @@ def main():
     print("""
 ╔══════════════════════════════════════════════╗
 ║   BTC Feature Engine — Tầng 2               ║
-║   Chạy mỗi 5 phút                           ║
+║   Chạy mỗi 1 phút                           ║
 ╚══════════════════════════════════════════════╝
     """)
 
@@ -92,7 +92,7 @@ def main():
     # Sau đó chờ đến mốc 5 phút tiếp theo
     while True:
         now        = pd.Timestamp.now(tz="UTC")
-        next_run   = (now + pd.Timedelta(minutes=5)).floor("5min")
+        next_run   = (now + pd.Timedelta(minutes=1)).floor("1min")
         sleep_secs = (next_run - now).total_seconds()
 
         print(f"[FE] ⏳ Chờ đến {next_run.strftime('%H:%M')} UTC ({sleep_secs:.0f}s)...")

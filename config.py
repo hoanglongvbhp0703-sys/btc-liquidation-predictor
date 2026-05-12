@@ -21,17 +21,16 @@ OI_FILE        = DATA_DIR / "open_interest.csv"
 FUNDING_FILE   = DATA_DIR / "funding_rate.csv"
 
 # ── Processed files (feature_engine / signal → đây) ──────────────
-FEATURES_FILE   = DATA_DIR / "features_5m.csv"
+FEATURES_FILE     = DATA_DIR / "features_1m.csv"
 PAPER_TRADES_FILE = DATA_DIR / "paper_trades.csv"
 
 # ── ML artifacts ─────────────────────────────────────────────────
-MODEL_LONG_FILE    = ML_DIR / "lgb_model_long.pkl"
-MODEL_SHORT_FILE   = ML_DIR / "lgb_model_short.pkl"
 META_FILE          = ML_DIR / "meta.json"
 TRAIN_HISTORY_FILE = ML_DIR / "train_history.json"
 
 # ── Trading constants ─────────────────────────────────────────────
 SIGNAL_THRESHOLD = 0.70
 MIN_RR           = 1.5
-HORIZONS         = [5, 10, 15, 20, 25, 30]
+HORIZONS         = [1, 2, 3]
 MIN_ROWS_TRAIN   = 200
+RUN_INTERVAL_FE  = 60    # feature engine: mỗi 1 phút

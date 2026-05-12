@@ -3,29 +3,20 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BTC Liquidation Dashboard</title>
+  <title>BTC Cascade Predictor</title>
   {% load static %}
-  <link rel="stylesheet" href="{% static 'css/style.css' %}?v=4">
-  <!-- Lightweight Charts (TradingView OSS) -->
+  <link rel="stylesheet" href="{% static 'css/style.css' %}?v=6">
   <script src="{% static 'vendor/lightweight-charts.js' %}"></script>
-  <!-- Chart.js cho CVD bar chart -->
   <script src="{% static 'vendor/chart.umd.js' %}"></script>
 </head>
 <body>
 
-<!-- ── Header ──────────────────────────────────────────────── -->
+<!-- ── Header ─────────────────────────────────────────────── -->
 <header class="header">
   <div class="header-left">
     <span class="pair">BTC/USDT</span>
     <span class="price" id="price">---</span>
     <span class="change neutral" id="price-change">0.00%</span>
-  </div>
-  <div class="header-center">
-    <span class="label">Liq Upper</span>
-    <span class="liq-upper" id="liq-upper">---</span>
-    <span class="sep">|</span>
-    <span class="label">Liq Lower</span>
-    <span class="liq-lower" id="liq-lower">---</span>
   </div>
   <div class="header-right">
     <span class="live-dot" id="live-dot">●</span>
@@ -33,41 +24,47 @@
   </div>
 </header>
 
-<!-- ── Main grid ────────────────────────────────────────────── -->
+<!-- ── Main grid ──────────────────────────────────────────── -->
 <div class="main-grid">
 
   <!-- Chart -->
   <section class="chart-section">
-    <div class="section-title">Price Chart <span class="tf-badge">1m</span></div>
+    <div class="section-title">Price Chart <span class="tf-badge" id="tf-label">--</span></div>
     <div id="chart"></div>
   </section>
 
-  <!-- Signal Panel -->
+  <!-- Cascade Signal Panel -->
   <aside class="signal-panel">
-    <div class="section-title">Signal</div>
+    <div class="section-title">Cascade Signal</div>
 
-    <!-- LONG prob -->
+    <!-- LONG cascade prob -->
     <div class="prob-block">
       <div class="prob-label">
-        <span style="color:var(--green)">▲ LONG</span>
-        — chạm Liq Upper <span class="prob-window">30p</span>
+        <span style="color:var(--green)">▲ LONG CASCADE</span>
+        <span class="prob-sub">SHORT liq storm → giá TĂNG</span>
       </div>
       <div class="prob-bar-wrap">
         <div class="prob-bar" id="prob-bar-long"></div>
       </div>
-      <div class="prob-value" id="prob-value-long">---%</div>
+      <div class="prob-row">
+        <span class="prob-value" id="prob-value-long">---%</span>
+        <span class="ttc-badge" id="ttc-long">---</span>
+      </div>
     </div>
 
-    <!-- SHORT prob -->
-    <div class="prob-block" style="margin-top:4px">
+    <!-- SHORT cascade prob -->
+    <div class="prob-block">
       <div class="prob-label">
-        <span style="color:var(--red)">▼ SHORT</span>
-        — chạm Liq Lower <span class="prob-window">30p</span>
+        <span style="color:var(--red)">▼ SHORT CASCADE</span>
+        <span class="prob-sub">LONG liq storm → giá GIẢM</span>
       </div>
       <div class="prob-bar-wrap">
         <div class="prob-bar prob-bar-short" id="prob-bar-short"></div>
       </div>
-      <div class="prob-value" id="prob-value-short">---%</div>
+      <div class="prob-row">
+        <span class="prob-value" id="prob-value-short">---%</span>
+        <span class="ttc-badge" id="ttc-short">---</span>
+      </div>
     </div>
 
     <div class="signal-divider"></div>
@@ -80,10 +77,6 @@
 
     <div class="mini-stats">
       <div class="mini-row">
-        <span class="mini-label">Dist TP</span>
-        <span class="mini-val" id="dist-upper">---%</span>
-      </div>
-      <div class="mini-row">
         <span class="mini-label">Imbalance</span>
         <span class="mini-val" id="imbalance">---</span>
       </div>
@@ -92,7 +85,7 @@
         <span class="mini-val" id="funding">---</span>
       </div>
       <div class="mini-row">
-        <span class="mini-label">OI Δ5m</span>
+        <span class="mini-label">OI Δ1m</span>
         <span class="mini-val" id="delta-oi">---</span>
       </div>
     </div>
@@ -100,13 +93,13 @@
 
 </div>
 
-<!-- ── Stats row ────────────────────────────────────────────── -->
+<!-- ── Stats row ──────────────────────────────────────────── -->
 <div class="stats-row">
 
-  <!-- Prob Curve Chart -->
+  <!-- Cascade Prob Curve -->
   <div class="stat-card curve-card">
     <div class="stat-title">
-      Xác suất chạm Liq
+      Cascade Probability Curve
       <span style="float:right;color:var(--green);font-size:9px">▲ LONG</span>
       <span style="float:right;color:var(--red);font-size:9px;margin-right:5px">▼ SHORT</span>
     </div>
@@ -114,12 +107,12 @@
       <canvas id="curve-chart"></canvas>
     </div>
     <div class="curve-x-labels">
-      <span>+5m</span><span>+10m</span><span>+15m</span><span>+20m</span><span>+25m</span><span>+30m</span>
+      <span>+1m</span><span>+2m</span><span>+3m</span>
     </div>
   </div>
 
   <div class="stat-card">
-    <div class="stat-title">CVD 5m</div>
+    <div class="stat-title">CVD 1m</div>
     <div class="cvd-value" id="cvd-value">---</div>
     <div class="cvd-chart-wrap">
       <canvas id="cvd-chart"></canvas>
@@ -164,7 +157,7 @@
 
 </div>
 
-<!-- ── Paper Trades Table ───────────────────────────────────── -->
+<!-- ── Paper Trades Table ─────────────────────────────────── -->
 <section class="trades-section">
   <div class="section-title">Paper Trades</div>
   <div class="table-wrap">
@@ -172,36 +165,37 @@
       <thead>
         <tr>
           <th>Time</th>
+          <th>Type</th>
           <th>Entry</th>
-          <th>TP</th>
-          <th>SL</th>
-          <th>R:R</th>
+          <th>TP (+0.8%)</th>
+          <th>SL (-0.5%)</th>
           <th>Prob</th>
+          <th>Est</th>
           <th>Outcome</th>
           <th>PnL</th>
         </tr>
       </thead>
       <tbody id="trades-body">
-        <tr><td colspan="8" class="no-data">Chưa có data</td></tr>
+        <tr><td colspan="9" class="no-data">Chưa có data</td></tr>
       </tbody>
     </table>
   </div>
 </section>
 
-<!-- ── Signal Alert Popup ───────────────────────────────────── -->
+<!-- ── Alert Popup ────────────────────────────────────────── -->
 <div class="alert-popup" id="alert-popup">
-  <div class="alert-icon">🚀</div>
+  <div class="alert-icon" id="alert-icon">⚡</div>
   <div class="alert-body">
-    <div class="alert-title">BTC LONG SIGNAL</div>
+    <div class="alert-title" id="alert-title">CASCADE SIGNAL</div>
     <div class="alert-detail" id="alert-detail"></div>
   </div>
   <button class="alert-close" onclick="document.getElementById('alert-popup').classList.remove('show')">✕</button>
 </div>
 
-<script src="{% static 'js/chart.js' %}?v=2"></script>
-<script src="{% static 'js/signal.js' %}?v=2"></script>
-<script src="{% static 'js/trades.js' %}?v=2"></script>
-<script src="{% static 'js/app.js' %}?v=2"></script>
+<script src="{% static 'js/chart.js' %}?v=3"></script>
+<script src="{% static 'js/signal.js' %}?v=3"></script>
+<script src="{% static 'js/trades.js' %}?v=3"></script>
+<script src="{% static 'js/app.js' %}?v=3"></script>
 
 </body>
 </html>

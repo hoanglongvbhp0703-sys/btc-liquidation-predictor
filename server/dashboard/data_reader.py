@@ -1,9 +1,5 @@
 """
 data_reader.py — Đọc CSV files → Python dicts
-
-Hai nhóm hàm:
-  - Fast (tail): dùng trong broadcaster (gọi mỗi 1s)
-  - Full load:   dùng trong REST views (gọi theo request)
 """
 
 import sys
@@ -12,11 +8,11 @@ from datetime import timezone, timedelta
 
 import pandas as pd
 
-ROOT_DIR = Path(__file__).parent.parent.parent   # /home/coder
+ROOT_DIR = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 from config import (
-    KLINES_FILE, LIQ_FILE, ORDERBOOK_FILE as OB_FILE,
-    FEATURES_FILE, PAPER_TRADES_FILE as TRADES_FILE,
+    KLINES_FILE, LIQ_FILE, FEATURES_FILE,
+    PAPER_TRADES_FILE as TRADES_FILE,
 )
 
 KLINE_COLS = ["open_time", "open", "high", "low", "close",
@@ -24,16 +20,15 @@ KLINE_COLS = ["open_time", "open", "high", "low", "close",
 LIQ_COLS   = ["event_time", "symbol", "side", "price", "qty", "usd_value"]
 
 
-# ── Fast tail read (không load toàn bộ file) ────────────────────
+# ── Fast tail read ─────────────────────────────────────────────
 
 def _tail_lines(filepath: Path, n: int = 10) -> list[str]:
-    """Đọc n dòng cuối của file mà không load toàn bộ."""
     if not filepath.exists():
         return []
     try:
         with open(filepath, "rb") as f:
             f.seek(0, 2)
-            size = f.tell()
+            size  = f.tell()
             chunk = min(size, 4096)
             f.seek(max(0, size - chunk))
             raw = f.read().decode("utf-8", errors="replace")
@@ -44,7 +39,6 @@ def _tail_lines(filepath: Path, n: int = 10) -> list[str]:
 
 
 def read_latest_kline() -> dict | None:
-    """Đọc nến 1s mới nhất. Rất nhanh — không load toàn file."""
     lines = _tail_lines(KLINES_FILE, 5)
     for line in reversed(lines):
         parts = line.split(",")
@@ -52,11 +46,11 @@ def read_latest_kline() -> dict | None:
             continue
         try:
             return {
-                "ts":    parts[0],
-                "open":  float(parts[1]),
-                "high":  float(parts[2]),
-                "low":   float(parts[3]),
-                "close": float(parts[4]),
+                "ts":     parts[0],
+                "open":   float(parts[1]),
+                "high":   float(parts[2]),
+                "low":    float(parts[3]),
+                "close":  float(parts[4]),
                 "volume": float(parts[5]),
             }
         except ValueError:
@@ -65,7 +59,6 @@ def read_latest_kline() -> dict | None:
 
 
 def read_latest_features() -> dict | None:
-    """Đọc feature row mới nhất từ features_5m.csv (có header)."""
     if not FEATURES_FILE.exists():
         return None
     try:
@@ -80,7 +73,6 @@ def read_latest_features() -> dict | None:
 
 
 def read_active_signal() -> dict | None:
-    """Đọc paper trade gần nhất chưa đóng (outcome trống, mở trong 30p)."""
     if not TRADES_FILE.exists():
         return None
     try:
@@ -88,29 +80,23 @@ def read_active_signal() -> dict | None:
         pending = df[df["outcome"] == ""]
         if pending.empty:
             return None
-        latest = pending.iloc[-1].to_dict()
+        latest    = pending.iloc[-1].to_dict()
         opened_at = pd.to_datetime(latest.get("opened_at"), utc=True, errors="coerce")
         if pd.isna(opened_at):
             return None
-        now = pd.Timestamp.now(tz="UTC")
-        if now - opened_at > timedelta(minutes=30):
-            return None  # đã quá 30 phút, outcome chưa điền
+        if pd.Timestamp.now(tz="UTC") - opened_at > timedelta(minutes=30):
+            return None
         return latest
     except Exception:
         return None
 
 
-# ── Full load (REST views) ────────────────────────────────────────
+# ── Full load (REST views) ────────────────────────────────────
 
-def load_klines_chart(hours: int = 2) -> list[dict]:
-    """
-    Đọc klines_1s, aggregate thành 1m candles cho chart.
-    Trả về list[dict] với keys: ts, open, high, low, close, volume.
-    """
+def load_klines_chart(hours: int = 0) -> list[dict]:
     if not KLINES_FILE.exists():
         return []
     try:
-        since = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=hours)
         df = pd.read_csv(
             KLINES_FILE,
             names=KLINE_COLS, header=0,
@@ -119,17 +105,21 @@ def load_klines_chart(hours: int = 2) -> list[dict]:
             usecols=["open_time", "open", "high", "low", "close", "volume"],
         )
         df["open_time"] = pd.to_datetime(df["open_time"], format="ISO8601", utc=True, errors="coerce")
-        df = df.dropna(subset=["open_time"])
-        df = df[df["open_time"] >= since].sort_values("open_time")
+        df = df.dropna(subset=["open_time"]).sort_values("open_time")
+
+        if hours > 0:
+            since = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=hours)
+            df = df[df["open_time"] >= since]
 
         if df.empty:
             return []
 
-        df_1m = df.resample("1min", on="open_time").agg(
-            open=("open", "first"),
-            high=("high", "max"),
-            low=("low", "min"),
-            close=("close", "last"),
+        span_hours = (df["open_time"].iloc[-1] - df["open_time"].iloc[0]).total_seconds() / 3600
+        tf = "1min" if span_hours < 6 else ("5min" if span_hours <= 72 else "15min")
+
+        df_agg = df.resample(tf, on="open_time").agg(
+            open=("open", "first"), high=("high", "max"),
+            low=("low", "min"), close=("close", "last"),
             volume=("volume", "sum"),
         ).dropna().reset_index()
 
@@ -141,20 +131,19 @@ def load_klines_chart(hours: int = 2) -> list[dict]:
                 "low":    round(row["low"], 2),
                 "close":  round(row["close"], 2),
                 "volume": round(row["volume"], 3),
+                "tf":     tf,
             }
-            for _, row in df_1m.iterrows()
+            for _, row in df_agg.iterrows()
         ]
     except Exception as e:
         print(f"[DR] load_klines_chart error: {e}")
         return []
 
 
-def load_liquidations(hours: int = 4) -> list[dict]:
-    """Đọc liquidations trong N giờ gần nhất."""
+def load_liquidations(hours: int = 0) -> list[dict]:
     if not LIQ_FILE.exists():
         return []
     try:
-        since = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=hours)
         df = pd.read_csv(
             LIQ_FILE,
             names=LIQ_COLS, header=0,
@@ -162,7 +151,10 @@ def load_liquidations(hours: int = 4) -> list[dict]:
         )
         df["event_time"] = pd.to_datetime(df["event_time"], format="ISO8601", utc=True, errors="coerce")
         df = df.dropna(subset=["event_time"])
-        df = df[(df["event_time"] >= since) & (df["symbol"] == "BTCUSDT")]
+        df = df[df["symbol"] == "BTCUSDT"]
+        if hours > 0:
+            since = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=hours)
+            df = df[df["event_time"] >= since]
         df = df.sort_values("event_time")
         return [
             {
@@ -179,21 +171,18 @@ def load_liquidations(hours: int = 4) -> list[dict]:
 
 
 def load_trades(limit: int = 30) -> list[dict]:
-    """Đọc paper trades gần nhất."""
     if not TRADES_FILE.exists():
         return []
     try:
         df = pd.read_csv(TRADES_FILE, dtype=str)
-        df = df.tail(limit).fillna("").iloc[::-1]
-        return df.to_dict(orient="records")
+        return df.tail(limit).fillna("").iloc[::-1].to_dict(orient="records")
     except Exception:
         return []
 
 
 def load_signal_state() -> dict:
-    """Trả về state đầy đủ cho /api/signal/."""
-    feat    = read_latest_features()
-    signal  = read_active_signal()
+    feat   = read_latest_features()
+    signal = read_active_signal()
 
     def _f(key, default=None):
         if feat is None:
@@ -205,21 +194,17 @@ def load_signal_state() -> dict:
             return default
 
     return {
-        "current_price":  _f("current_price"),
-        "liq_upper":      _f("liq_zone_upper"),
-        "liq_lower":      _f("liq_zone_lower"),
-        "dist_upper_pct": _f("dist_to_upper"),
-        "imbalance":      _f("imbalance_now"),
-        "cvd_5m":         _f("cvd_delta_5m"),
-        "funding_rate":   _f("funding_rate"),
-        "delta_oi_5m":    _f("delta_oi_5m"),
-        "feature_ts":     feat.get("timestamp") if feat else None,
-        "active_signal":  _sig(signal),
+        "current_price": _f("current_price"),
+        "imbalance":     _f("imbalance_now"),
+        "cvd_5m":        _f("cvd_delta_5m"),
+        "funding_rate":  _f("funding_rate"),
+        "delta_oi_5m":   _f("delta_oi_5m"),
+        "feature_ts":    feat.get("timestamp") if feat else None,
+        "active_signal": _sig(signal),
     }
 
 
 def _sig(signal: dict | None) -> dict | None:
-    """Convert active signal string fields → float cho API response."""
     if signal is None:
         return None
     def _to_f(v):
@@ -228,10 +213,12 @@ def _sig(signal: dict | None) -> dict | None:
         except (TypeError, ValueError):
             return None
     return {
-        "entry":     _to_f(signal.get("entry")),
-        "tp":        _to_f(signal.get("tp")),
-        "sl":        _to_f(signal.get("sl")),
-        "rr":        _to_f(signal.get("rr")),
-        "prob":      _to_f(signal.get("prob")),
-        "opened_at": signal.get("opened_at", ""),
+        "signal":      signal.get("signal", ""),
+        "entry":       _to_f(signal.get("entry")),
+        "tp":          _to_f(signal.get("tp")),
+        "sl":          _to_f(signal.get("sl")),
+        "rr":          _to_f(signal.get("rr")),
+        "prob":        _to_f(signal.get("prob")),
+        "est_minutes": _to_f(signal.get("est_minutes")),
+        "opened_at":   signal.get("opened_at", ""),
     }

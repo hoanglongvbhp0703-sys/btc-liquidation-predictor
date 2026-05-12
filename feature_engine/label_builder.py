@@ -1,21 +1,19 @@
 """
-label_builder.py — Tầng 3: Xây dựng label cho features_5m.csv
+label_builder.py — Tầng 3: Build cascade liquidation labels
 
-Logic LONG (label_Xm):
-  label_Xm = 1  nếu max(high) trong [T, T+Xm] >= liq_zone_upper
-  label_Xm = 0  nếu không
+Cascade LONG (cascade_long_Xm):
+  = 1 nếu sum(liq_short_usd[T→T+Xm]) > 2 × avg_liq_short_1h
+  Ý nghĩa: SHORT bị liq nhiều → giá TĂNG → LONG trade opportunity
 
-Logic SHORT (label_short_Xm):
-  label_short_Xm = 1  nếu min(low) trong [T, T+Xm] <= liq_zone_lower
-  label_short_Xm = 0  nếu không
+Cascade SHORT (cascade_short_Xm):
+  = 1 nếu sum(liq_long_usd[T→T+Xm]) > 2 × avg_liq_long_1h
+  Ý nghĩa: LONG bị liq nhiều → giá GIẢM → SHORT trade opportunity
 
-Alias backward compat:
-  label       = label_30m
-  label_short = label_short_30m
+liq_short_usd = usd_value where side == 'BUY'  (SHORT position bị liquidated)
+liq_long_usd  = usd_value where side == 'SELL' (LONG position bị liquidated)
 
-Mã đặc biệt:
-  -1 = liq_zone_upper/lower là null/NaN
-  -2 = không đủ kline data trong cửa sổ
+time_to_cascade_long/short:
+  = first h ∈ {5,10,15,20,25,30} where cascade_hm == 1, else NaN
 """
 
 import pandas as pd
@@ -24,37 +22,22 @@ from datetime import timedelta
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import FEATURES_FILE, KLINES_FILE
+from config import FEATURES_FILE, LIQ_FILE
 
-HORIZONS   = [5, 10, 15, 20, 25, 30]
-MIN_KLINES = 5
-
-
-def _label_col(direction: str, minutes: int) -> str:
-    """Tên cột label. label/label_short là alias cho 30m (backward compat)."""
-    if direction == "long":
-        return "label" if minutes == 30 else f"label_{minutes}m"
-    return "label_short" if minutes == 30 else f"label_short_{minutes}m"
+HORIZONS          = [1, 2, 3]
+LOOKBACK_MINUTES  = 30        # baseline từ 30 phút lịch sử
+MIN_LIQ_THRESHOLD = 10_000    # $10k/min min threshold (scale down cho 1m window)
 
 
-ALL_LABEL_COLS = [_label_col("long", h)  for h in HORIZONS] + \
-                 [_label_col("short", h) for h in HORIZONS]
+def _cascade_col(direction: str, minutes: int) -> str:
+    return f"cascade_{direction}_{minutes}m"
 
 
-def _load_klines_for_range(t_start: pd.Timestamp, t_end: pd.Timestamp) -> pd.DataFrame:
-    df = pd.read_csv(
-        KLINES_FILE,
-        names=["open_time", "open", "high", "low", "close",
-               "volume", "taker_buy_vol", "num_trades"],
-        header=0,
-        dtype={"high": float, "low": float},
-        usecols=["open_time", "high", "low"],
-    )
-    df["open_time"] = pd.to_datetime(
-        df["open_time"], format="ISO8601", utc=True, errors="coerce"
-    )
-    df = df.dropna(subset=["open_time"])
-    return df[(df["open_time"] >= t_start) & (df["open_time"] <= t_end)].reset_index(drop=True)
+ALL_LABEL_COLS = (
+    [_cascade_col("long",  h) for h in HORIZONS] +
+    [_cascade_col("short", h) for h in HORIZONS] +
+    ["time_to_cascade_long", "time_to_cascade_short"]
+)
 
 
 def _is_pending(val) -> bool:
@@ -65,177 +48,139 @@ def _is_pending(val) -> bool:
     return str(val).strip() == ""
 
 
+def _load_liq() -> pd.DataFrame:
+    df = pd.read_csv(
+        LIQ_FILE,
+        usecols=["event_time", "side", "usd_value"],
+        dtype={"usd_value": float},
+    )
+    df["event_time"] = pd.to_datetime(df["event_time"], utc=True, errors="coerce")
+    df = df.dropna(subset=["event_time"]).sort_values("event_time")
+    df["liq_short"] = df["usd_value"].where(df["side"] == "BUY",  0.0)
+    df["liq_long"]  = df["usd_value"].where(df["side"] == "SELL", 0.0)
+    return df
+
+
 def build_pending_labels() -> int:
     if not FEATURES_FILE.exists():
-        print("[LB] features_5m.csv chưa tồn tại, bỏ qua.")
+        print("[LB] features_5m.csv chưa tồn tại.")
+        return 0
+    if not LIQ_FILE.exists():
+        print("[LB] liquidations.csv chưa tồn tại.")
         return 0
 
     df_feat = pd.read_csv(FEATURES_FILE)
-
     for col in ALL_LABEL_COLS:
         if col not in df_feat.columns:
             df_feat[col] = ""
 
-    # Xác định row nào còn pending bất kỳ horizon nào
     pending_mask = pd.Series(False, index=df_feat.index)
     for col in ALL_LABEL_COLS:
         pending_mask |= df_feat[col].apply(_is_pending)
 
     pending_idx = df_feat[pending_mask].index.tolist()
-
     if not pending_idx:
         return 0
 
-    if not KLINES_FILE.exists():
-        print("[LB] klines_1s.csv chưa tồn tại, bỏ qua.")
-        return 0
+    df_liq      = _load_liq()
+    now_utc     = pd.Timestamp.now(tz="UTC")
+    max_horizon = timedelta(minutes=max(HORIZONS))
+    lookback    = timedelta(minutes=LOOKBACK_MINUTES)
 
-    now_utc = pd.Timestamp.now(tz="UTC")
-    max_delay = timedelta(minutes=max(HORIZONS))
-
-    ts_series = pd.to_datetime(
-        df_feat.loc[pending_idx, "timestamp"], format="ISO8601", utc=True, errors="coerce"
-    ).dropna()
-
-    if ts_series.empty:
-        return 0
-
-    df_klines = _load_klines_for_range(ts_series.min(), ts_series.max() + max_delay)
-
-    labeled_30m = 0
-    skipped     = 0
+    labeled_count = 0
+    skipped       = 0
 
     for idx in pending_idx:
         row = df_feat.loc[idx]
-
         try:
             t_start = pd.Timestamp(row["timestamp"], tz="UTC")
         except Exception:
             continue
 
-        # Liq zones
-        liq_upper_valid = False
-        liq_upper = None
-        try:
-            liq_upper = float(row.get("liq_zone_upper"))
-            if not pd.isna(liq_upper):
-                liq_upper_valid = True
-        except (TypeError, ValueError):
-            pass
+        if t_start + max_horizon > now_utc:
+            skipped += 1
+            continue
 
-        liq_lower_valid = False
-        liq_lower = None
-        try:
-            liq_lower = float(row.get("liq_zone_lower"))
-            if not pd.isna(liq_lower):
-                liq_lower_valid = True
-        except (TypeError, ValueError):
-            pass
+        # Threshold từ lookback [T-2h, T)
+        t_lb = t_start - lookback
+        liq_hist = df_liq[(df_liq["event_time"] >= t_lb) & (df_liq["event_time"] < t_start)]
 
-        # Klines cho toàn bộ max horizon
-        klines_max = df_klines[
-            (df_klines["open_time"] >= t_start) &
-            (df_klines["open_time"] <= t_start + max_delay)
+        hist_start  = liq_hist["event_time"].min() if not liq_hist.empty else t_lb
+        n_minutes   = max((t_start - hist_start).total_seconds() / 60, 1.0)
+
+        # Per-minute baseline rate
+        avg_short_pm = max(liq_hist["liq_short"].sum() / n_minutes, MIN_LIQ_THRESHOLD)
+        avg_long_pm  = max(liq_hist["liq_long"].sum()  / n_minutes, MIN_LIQ_THRESHOLD)
+
+        # Forward liq [T, T+max_horizon)
+        liq_fwd = df_liq[
+            (df_liq["event_time"] >= t_start) &
+            (df_liq["event_time"] <  t_start + max_horizon)
         ]
 
-        row_skipped = True
+        ttc_long  = float("nan")
+        ttc_short = float("nan")
 
         for h in HORIZONS:
-            t_end_h    = t_start + timedelta(minutes=h)
-            col_long   = _label_col("long",  h)
-            col_short  = _label_col("short", h)
-            need_long  = _is_pending(df_feat.at[idx, col_long])
-            need_short = _is_pending(df_feat.at[idx, col_short])
+            t_end = t_start + timedelta(minutes=h)
+            liq_h = liq_fwd[liq_fwd["event_time"] < t_end]
 
-            if not need_long and not need_short:
-                continue
+            # cascade nếu rate trung bình trong cửa sổ h phút > 3× baseline per-minute
+            c_long  = 1 if liq_h["liq_short"].sum() > 3 * avg_short_pm * h else 0
+            c_short = 1 if liq_h["liq_long"].sum()  > 3 * avg_long_pm  * h else 0
 
-            if t_end_h > now_utc:
-                skipped += 1
-                continue
+            col_l = _cascade_col("long",  h)
+            col_s = _cascade_col("short", h)
+            if _is_pending(df_feat.at[idx, col_l]):
+                df_feat.at[idx, col_l] = c_long
+            if _is_pending(df_feat.at[idx, col_s]):
+                df_feat.at[idx, col_s] = c_short
 
-            row_skipped = False
-            klines_h   = klines_max[klines_max["open_time"] <= t_end_h]
-            no_klines  = len(klines_h) < MIN_KLINES
+            if pd.isna(ttc_long)  and c_long  == 1:
+                ttc_long  = float(h)
+            if pd.isna(ttc_short) and c_short == 1:
+                ttc_short = float(h)
 
-            if need_long:
-                if not liq_upper_valid:
-                    df_feat.at[idx, col_long] = -1
-                elif no_klines:
-                    df_feat.at[idx, col_long] = -2
-                else:
-                    max_high = float(klines_h["high"].max())
-                    df_feat.at[idx, col_long] = 1 if max_high >= liq_upper else 0
-                    if h == 30:
-                        labeled_30m += 1
+        if _is_pending(df_feat.at[idx, "time_to_cascade_long"]):
+            df_feat.at[idx, "time_to_cascade_long"]  = ttc_long
+        if _is_pending(df_feat.at[idx, "time_to_cascade_short"]):
+            df_feat.at[idx, "time_to_cascade_short"] = ttc_short
 
-            if need_short:
-                if not liq_lower_valid:
-                    df_feat.at[idx, col_short] = -1
-                elif no_klines:
-                    df_feat.at[idx, col_short] = -2
-                else:
-                    min_low = float(klines_h["low"].min())
-                    df_feat.at[idx, col_short] = 1 if min_low <= liq_lower else 0
+        labeled_count += 1
 
     df_feat.to_csv(FEATURES_FILE, index=False)
 
-    def _stats(col):
-        s = df_feat[col].astype(str)
-        labeled  = s.str.match(r"^[01]$").sum()
-        positive = s.eq("1").sum()
-        return labeled, positive
+    for direction in ("long", "short"):
+        for h in HORIZONS:
+            col = _cascade_col(direction, h)
+            s   = pd.to_numeric(df_feat[col], errors="coerce")
+            n   = s.isin([0, 1]).sum()
+            pos = (s == 1).sum()
+            br  = pos / n if n > 0 else 0.0
+            print(f"[LB] {col}: labeled={n}  pos={pos}  base_rate={br:.1%}")
 
-    long_labeled, long_pos = _stats("label")
-    short_labeled, short_pos = _stats("label_short")
-    long_br  = long_pos  / long_labeled  if long_labeled  > 0 else 0.0
-    short_br = short_pos / short_labeled if short_labeled > 0 else 0.0
-
-    print(
-        f"[LB] LONG  +{labeled_30m} labeled (30m) | pending: {skipped} | "
-        f"total: {long_labeled} | base rate: {long_br:.1%}\n"
-        f"[LB] SHORT labeled: {short_labeled} | base rate: {short_br:.1%}"
-    )
-
-    return labeled_30m
+    print(f"[LB] Labeled {labeled_count} rows this run | pending (too recent): {skipped}")
+    return labeled_count
 
 
 def label_summary() -> dict:
     if not FEATURES_FILE.exists():
         return {}
-
     df = pd.read_csv(FEATURES_FILE)
-
-    def _stats(col):
-        if col not in df.columns:
-            return {}
-        s = df[col].astype(str)
-        labeled  = s.str.match(r"^[01]$").sum()
-        positive = s.eq("1").sum()
-        return {
-            "labeled":   int(labeled),
-            "positive":  int(positive),
-            "negative":  int(s.eq("0").sum()),
-            "base_rate": round(positive / labeled, 4) if labeled > 0 else 0.0,
-            "no_zone":   int(s.eq("-1").sum()),
-            "no_klines": int(s.eq("-2").sum()),
-        }
-
-    summary = {"total_rows": len(df), "long": {}, "short": {}}
-    print("\n── Label Summary ──────────────────────────")
-    print(f"  total_rows : {summary['total_rows']}")
-
+    summary = {"total_rows": len(df)}
+    print(f"\n── Cascade Label Summary ──────────────────────")
+    print(f"  total_rows: {len(df)}")
     for direction in ("long", "short"):
-        print(f"\n  {direction.upper()}:")
+        print(f"\n  {direction.upper()} CASCADE:")
         for h in HORIZONS:
-            col = _label_col(direction, h)
-            st  = _stats(col)
-            summary[direction][f"{h}m"] = st
-            labeled  = st.get("labeled", 0)
-            base_rate = st.get("base_rate", 0.0)
-            print(f"    {h:>2}m  labeled={labeled:>5}  base_rate={base_rate:.1%}")
-
-    print("──────────────────────────────────────────\n")
+            col = _cascade_col(direction, h)
+            if col not in df.columns:
+                continue
+            s   = pd.to_numeric(df[col], errors="coerce")
+            n   = s.isin([0, 1]).sum()
+            pos = (s == 1).sum()
+            br  = pos / n if n > 0 else 0.0
+            print(f"    {h:>2}m  labeled={n:>5}  base_rate={br:.1%}")
     return summary
 
 

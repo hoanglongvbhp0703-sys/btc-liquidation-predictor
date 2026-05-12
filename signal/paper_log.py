@@ -16,10 +16,10 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import PAPER_TRADES_FILE, KLINES_FILE
 
-OUTCOME_WINDOW = timedelta(minutes=30)
+OUTCOME_WINDOW = timedelta(minutes=3)
 
 PAPER_COLS = [
-    "opened_at", "signal", "prob", "entry", "tp", "sl", "rr",
+    "opened_at", "signal", "prob", "entry", "tp", "sl", "rr", "est_minutes",
     "closed_at", "outcome", "pnl_pct", "hit_tp", "hit_sl",
 ]
 
@@ -34,18 +34,19 @@ def log_signal(signal: dict, opened_at: pd.Timestamp) -> None:
     """Ghi 1 signal mới vào paper_trades.csv (chưa có outcome)."""
     _init_file()
     row = {
-        "opened_at": opened_at.isoformat(),
-        "signal":    signal["signal"],
-        "prob":      signal["prob"],
-        "entry":     signal["entry"],
-        "tp":        signal["tp"],
-        "sl":        signal["sl"],
-        "rr":        signal["rr"],
-        "closed_at": "",
-        "outcome":   "",
-        "pnl_pct":   "",
-        "hit_tp":    "",
-        "hit_sl":    "",
+        "opened_at":   opened_at.isoformat(),
+        "signal":      signal["signal"],
+        "prob":        signal["prob"],
+        "entry":       signal["entry"],
+        "tp":          signal["tp"],
+        "sl":          signal["sl"],
+        "rr":          signal["rr"],
+        "est_minutes": signal.get("est_minutes", ""),
+        "closed_at":   "",
+        "outcome":     "",
+        "pnl_pct":     "",
+        "hit_tp":      "",
+        "hit_sl":      "",
     }
     with open(PAPER_TRADES_FILE, "a", newline="", encoding="utf-8") as f:
         csv.DictWriter(f, fieldnames=PAPER_COLS, extrasaction="ignore").writerow(row)
@@ -97,8 +98,8 @@ def check_outcomes() -> int:
                 names=["open_time", "open", "high", "low", "close",
                        "volume", "taker_buy_vol", "num_trades"],
                 header=None,
-                dtype={"high": float, "low": float},
-                usecols=["open_time", "high", "low"],
+                dtype={"high": float, "low": float, "close": float},
+                usecols=["open_time", "high", "low", "close"],
             )
             klines["open_time"] = pd.to_datetime(
                 klines["open_time"], format="ISO8601", utc=True, errors="coerce"
@@ -117,29 +118,39 @@ def check_outcomes() -> int:
         hit_tp = hit_sl = False
         close_price = entry
 
+        is_long = trade.get("signal", "CASCADE_LONG") != "CASCADE_SHORT"
         for _, row in window.iterrows():
-            if row["high"] >= tp:
-                hit_tp = True
-                break
-            if row["low"] <= sl:
-                hit_sl = True
-                break
-            close_price = row["low"] if row["low"] < entry else row["high"]
+            if is_long:
+                if row["high"] >= tp:
+                    hit_tp = True
+                    break
+                if row["low"] <= sl:
+                    hit_sl = True
+                    break
+            else:
+                if row["low"] <= tp:
+                    hit_tp = True
+                    break
+                if row["high"] >= sl:
+                    hit_sl = True
+                    break
+            close_price = float(row["close"]) if "close" in row else float(row["low"])
         else:
             # Không hit → dùng giá cuối cùng trong cửa sổ
             close_price = float(window.iloc[-1]["low"])
 
+        is_long = trade.get("signal", "CASCADE_LONG") != "CASCADE_SHORT"
         if hit_tp:
-            outcome  = "WIN"
-            pnl_pct  = round((tp - entry) / entry * 100, 3)
+            outcome   = "WIN"
+            pnl_pct   = round(abs(tp - entry) / entry * 100, 3)
             closed_at = opened_at + OUTCOME_WINDOW
         elif hit_sl:
-            outcome  = "LOSS"
-            pnl_pct  = round((sl - entry) / entry * 100, 3)
+            outcome   = "LOSS"
+            pnl_pct   = round(-abs(sl - entry) / entry * 100, 3)
             closed_at = opened_at + OUTCOME_WINDOW
         else:
             outcome   = "EXPIRED"
-            pnl_pct   = round((close_price - entry) / entry * 100, 3)
+            pnl_pct   = round((close_price - entry) / entry * 100 * (1 if is_long else -1), 3)
             closed_at = t_end
 
         df.at[idx, "closed_at"] = closed_at.isoformat()

@@ -1,22 +1,12 @@
 """
-run.py — Tầng 5: Signal Output
+run.py — Tầng 5: Signal Output (Cascade Liquidation)
 
-Chạy song song với feature_engine/run.py (cùng mốc 5 phút):
-    python signal/run.py
-
-Mỗi chu kỳ 5 phút:
+Mỗi 5 phút:
   1. Đọc feature row mới nhất từ features_5m.csv
-  2. Nếu model chưa train (saved/ trống) → bỏ qua, thông báo
-  3. Predict signal với model XGBoost
-  4. Nếu có signal LONG:
-       → ghi paper_log
-       → gửi Telegram
-  5. Check outcome của paper trades cũ (đủ 30 phút chưa?)
-  6. In stats mỗi 1 giờ (12 chu kỳ)
-
-Phụ thuộc:
-  - model/saved/ phải có xgb_model.json (chạy model/train.py trước)
-  - data/features_5m.csv phải đang được cập nhật bởi feature_engine/run.py
+  2. Predict cascade probability + timing
+  3. Nếu cascade_prob >= 0.70 AND time_to_cascade <= 15m → ghi paper trade
+  4. Check outcome trades cũ
+  5. In stats mỗi 1 giờ
 """
 
 import sys
@@ -26,45 +16,35 @@ from pathlib import Path
 
 import pandas as pd
 
-# ─── Thêm thư mục gốc vào sys.path để import ml/ ───────────────
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(ROOT_DIR / "ml"))
 
-from predict   import load_model, predict_signal   # noqa: E402
-from paper_log import log_signal, check_outcomes, print_stats   # noqa: E402
-from notifier  import notify_signal   # noqa: E402
+from predict   import load_model, predict_cascade_signal
+from paper_log import log_signal, check_outcomes, print_stats
+from notifier  import notify_signal
 
-from config import FEATURES_FILE, MODEL_LONG_FILE, SIGNAL_THRESHOLD, MIN_ROWS_TRAIN
+from config import FEATURES_FILE, ML_DIR, SIGNAL_THRESHOLD, MIN_ROWS_TRAIN
 
-RUN_INTERVAL  = 300   # 5 phút
-STATS_EVERY   = 12    # in stats mỗi 12 chu kỳ = 1 giờ
+MODEL_FILE    = ML_DIR / "lgb_cascade_long_3m.pkl"
+RUN_INTERVAL  = 60
+STATS_EVERY   = 60
+MAX_TTC       = 2.0    # chỉ trade khi cascade dự đoán <= 2 phút
 
 
 def load_latest_feature_row() -> dict | None:
-    """
-    Đọc row mới nhất từ features_5m.csv.
-    Bỏ qua row có label đã điền (dùng row mới nhất chưa bị điền label
-    hoặc row cuối cùng nếu tất cả đã có label).
-    """
     if not FEATURES_FILE.exists():
-        print("[SIG] ⚠️  features_5m.csv chưa có — feature_engine/run.py đang chạy chưa?")
+        print("[SIG] features_5m.csv chưa có.")
         return None
-
     try:
         df = pd.read_csv(FEATURES_FILE, dtype=str)
         if df.empty:
-            print("[SIG] ⚠️  features_5m.csv trống.")
             return None
-
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
-
-        row = df.iloc[-1].to_dict()
-        return row
-
+        return df.iloc[-1].to_dict()
     except Exception as e:
-        print(f"[SIG] ❌ Lỗi đọc features_5m.csv: {e}")
+        print(f"[SIG] Lỗi đọc features_5m.csv: {e}")
         return None
 
 
@@ -77,67 +57,44 @@ def _to_float(val) -> float | None:
 
 
 def run_once(model_ctx: dict | None, cycle: int) -> dict | None:
-    """
-    Chạy 1 chu kỳ predict + check outcomes.
-    Trả về model_ctx (có thể reload nếu model mới được train).
-    """
     now = pd.Timestamp.now(tz="UTC")
     print(f"\n[SIG] ── {now.strftime('%Y-%m-%d %H:%M')} UTC ──")
 
-    # ── (Re)load model nếu chưa có hoặc model file mới hơn ────────
-    model_file = MODEL_LONG_FILE
-
     if model_ctx is None:
-        if model_file.exists():
+        if MODEL_FILE.exists():
             try:
                 model_ctx = load_model()
-                print(f"[SIG] ✅ Model loaded | AUC_test={model_ctx['meta'].get('auc_test')}")
+                print(f"[SIG] Model loaded | avg_auc={model_ctx['meta'].get('avg_auc_test')}")
             except Exception as e:
-                print(f"[SIG] ❌ Load model thất bại: {e}")
+                print(f"[SIG] Load model lỗi: {e}")
         else:
-            labeled_count = _count_labeled_rows()
-            print(
-                f"[SIG] ⏳ Model chưa train. "
-                f"Đang tích lũy labeled data: {labeled_count} rows "
-                f"(cần ít nhất 200, khuyến nghị 2000+).\n"
-                f"       Khi đủ data: python model/train.py"
-            )
+            n = _count_labeled_rows()
+            print(f"[SIG] Model chưa train. cascade_long_30m labeled: {n} (cần {MIN_ROWS_TRAIN}+)")
 
-    # ── Check outcome paper trades cũ ─────────────────────────────
     try:
         n_closed = check_outcomes()
         if n_closed > 0:
-            print(f"[SIG] 🔔 Đã đóng {n_closed} paper trade(s)")
+            print(f"[SIG] Đóng {n_closed} paper trade(s)")
     except Exception as e:
-        print(f"[SIG] ❌ Lỗi check_outcomes: {e}")
+        print(f"[SIG] check_outcomes lỗi: {e}")
         traceback.print_exc()
 
-    # ── Predict signal ─────────────────────────────────────────────
     if model_ctx is None:
-        return model_ctx  # chưa có model, bỏ qua predict
+        return model_ctx
 
-    feature_row = load_latest_feature_row()
+    feature_row   = load_latest_feature_row()
     if feature_row is None:
         return model_ctx
 
-    current_price   = _to_float(feature_row.get("current_price"))
-    liq_zone_upper  = _to_float(feature_row.get("liq_zone_upper"))
-    liq_zone_lower  = _to_float(feature_row.get("liq_zone_lower"))
-
+    current_price = _to_float(feature_row.get("current_price"))
     if current_price is None:
-        print("[SIG] ⚠️  current_price không hợp lệ trong feature row mới nhất.")
+        print("[SIG] current_price không hợp lệ.")
         return model_ctx
 
     try:
-        signal = predict_signal(
-            model_ctx,
-            feature_row,
-            current_price,
-            liq_zone_upper,
-            liq_zone_lower,
-        )
+        signal = predict_cascade_signal(model_ctx, feature_row, current_price, max_ttc=MAX_TTC)
     except Exception as e:
-        print(f"[SIG] ❌ Lỗi predict_signal: {e}")
+        print(f"[SIG] predict_cascade_signal lỗi: {e}")
         traceback.print_exc()
         return model_ctx
 
@@ -146,16 +103,8 @@ def run_once(model_ctx: dict | None, cycle: int) -> dict | None:
         log_signal(signal, opened_at)
         notify_signal(signal, opened_at)
     else:
-        prob_hint = ""
-        try:
-            from model.predict import predict_proba
-            prob = predict_proba(model_ctx, feature_row)
-            prob_hint = f" (prob={prob:.3f}, threshold={model_ctx['threshold']})"
-        except Exception:
-            pass
-        print(f"[SIG] ─ Không có signal{prob_hint}")
+        print(f"[SIG] Không có signal (threshold={SIGNAL_THRESHOLD}, max_ttc={MAX_TTC}m)")
 
-    # ── In stats mỗi STATS_EVERY chu kỳ ──────────────────────────
     if cycle % STATS_EVERY == 0:
         try:
             print_stats()
@@ -167,8 +116,9 @@ def run_once(model_ctx: dict | None, cycle: int) -> dict | None:
 
 def _count_labeled_rows() -> int:
     try:
-        df = pd.read_csv(FEATURES_FILE)
-        return int(pd.to_numeric(df["label"], errors="coerce").isin([0, 1]).sum())
+        df  = pd.read_csv(FEATURES_FILE)
+        col = "cascade_long_3m" if "cascade_long_3m" in df.columns else "label"
+        return int(pd.to_numeric(df[col], errors="coerce").isin([0, 1]).sum())
     except Exception:
         return 0
 
@@ -176,25 +126,21 @@ def _count_labeled_rows() -> int:
 def main():
     print("""
 ╔══════════════════════════════════════════════╗
-║   BTC Signal Output — Tầng 5               ║
-║   Chạy mỗi 5 phút                          ║
+║   BTC Cascade Signal — Tầng 5              ║
+║   Chạy mỗi 1 phút                          ║
 ╚══════════════════════════════════════════════╝
     """)
 
     model_ctx = None
     cycle     = 0
-
-    # Chạy ngay lần đầu
     model_ctx = run_once(model_ctx, cycle)
 
     while True:
         now      = pd.Timestamp.now(tz="UTC")
-        next_run = (now + pd.Timedelta(minutes=5)).floor("5min")
+        next_run = (now + pd.Timedelta(minutes=1)).floor("1min")
         sleep_s  = (next_run - now).total_seconds()
-
-        print(f"[SIG] ⏳ Chờ đến {next_run.strftime('%H:%M')} UTC ({sleep_s:.0f}s)...")
+        print(f"[SIG] Chờ đến {next_run.strftime('%H:%M')} UTC ({sleep_s:.0f}s)...")
         time.sleep(max(sleep_s, 1))
-
         cycle    += 1
         model_ctx = run_once(model_ctx, cycle)
 
@@ -203,5 +149,5 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n[SIG] Đã dừng bởi người dùng.")
+        print("\n[SIG] Đã dừng.")
         print_stats()

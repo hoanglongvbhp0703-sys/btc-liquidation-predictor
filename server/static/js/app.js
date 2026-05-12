@@ -2,15 +2,14 @@
 
 (async () => {
 
-  // ── Init modules ──────────────────────────────────────────────
   ChartModule.init();
   SignalModule.init();
 
-  // ── Load historical data ──────────────────────────────────────
+  // ── Load historical data ──────────────────────────────────
   try {
     const [klinesRes, liqRes] = await Promise.all([
-      fetch('/api/klines/?hours=2'),
-      fetch('/api/liq/?hours=4'),
+      fetch('/api/klines/'),
+      fetch('/api/liq/?hours=9999'),
     ]);
     const klines = await klinesRes.json();
     const liqs   = await liqRes.json();
@@ -21,10 +20,9 @@
     console.error('Initial load error:', e);
   }
 
-  // Load trades (bảng + mini stats)
   await TradesModule.load();
 
-  // ── WebSocket ─────────────────────────────────────────────────
+  // ── WebSocket ─────────────────────────────────────────────
   const wsStatus  = document.getElementById('ws-status');
   const liveDot   = document.getElementById('live-dot');
   let   ws        = null;
@@ -36,8 +34,8 @@
 
     ws.onopen = () => {
       reconnect = 0;
-      wsStatus.textContent  = 'Live';
-      liveDot.className     = 'live-dot';
+      wsStatus.textContent = 'Live';
+      liveDot.className    = 'live-dot';
     };
 
     ws.onclose = () => {
@@ -53,14 +51,15 @@
       let tick;
       try { tick = JSON.parse(evt.data); } catch { return; }
 
-      // ── Giá header ───────────────────────────────────────────
+      // ── Price header ─────────────────────────────────────
       if (tick.price !== null) {
         const priceEl  = document.getElementById('price');
         const changeEl = document.getElementById('price-change');
-        const prev     = parseFloat(priceEl.dataset.raw || tick.price);
 
-        priceEl.textContent  = '$' + Number(tick.price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-        priceEl.dataset.raw  = tick.price;
+        priceEl.textContent = '$' + Number(tick.price).toLocaleString('en-US', {
+          minimumFractionDigits: 2, maximumFractionDigits: 2,
+        });
+        priceEl.dataset.raw = tick.price;
 
         if (tick.price_change_pct !== null) {
           const pct = tick.price_change_pct;
@@ -69,28 +68,16 @@
         }
       }
 
-      // ── Liq zones header + chart ─────────────────────────────
-      if (tick.liq_upper) {
-        document.getElementById('liq-upper').textContent =
-          '$' + Number(tick.liq_upper).toLocaleString('en-US', { maximumFractionDigits: 0 });
-      }
-      if (tick.liq_lower) {
-        document.getElementById('liq-lower').textContent =
-          '$' + Number(tick.liq_lower).toLocaleString('en-US', { maximumFractionDigits: 0 });
-      }
-      ChartModule.updateZones(tick.liq_upper, tick.liq_lower);
-
-      // ── Chart tick ───────────────────────────────────────────
+      // ── Chart tick ───────────────────────────────────────
       ChartModule.updateTick(tick);
 
-      // ── Signal panel ─────────────────────────────────────────
+      // ── Signal panel ─────────────────────────────────────
       SignalModule.onTick(tick);
     };
   }
 
   connect();
 
-  // ── Reload trades mỗi 30s ────────────────────────────────────
   setInterval(() => TradesModule.load(), 30000);
 
 })();
