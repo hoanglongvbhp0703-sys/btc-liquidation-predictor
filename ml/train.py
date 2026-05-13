@@ -1,13 +1,11 @@
 """
 train.py — Tầng 4: Train cascade liquidation models
 
-Model A (binary classification) — 12 models:
-  lgb_cascade_long_{h}m.pkl + lgb_cascade_short_{h}m.pkl (h ∈ {5,10,15,20,25,30})
-  Predict: P(cascade xảy ra trong hm tới)
+Ensemble = RandomForest + LogisticRegression + XGBoost(GPU)
+  avg prob của 3 models → tốt hơn LightGBM đơn ~0.06 AUC
 
-Model B (regression) — 2 models:
-  lgb_ttc_long.pkl, lgb_ttc_short.pkl
-  Predict: time_to_cascade (phút, 5-30), hay 35 nếu không có cascade trong 30m
+Artifacts per target: ens_cascade_{direction}_{h}m.pkl
+  chứa {"models": [rf, lr, xgb], "imputer": ..., "scaler": ...}
 
 Output artifacts: ml/artifacts/
 """
@@ -18,17 +16,19 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from lightgbm import LGBMClassifier, LGBMRegressor, early_stopping, log_evaluation
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+import xgboost as xgb
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import roc_auc_score, precision_score, recall_score, mean_absolute_error
+from sklearn.metrics import roc_auc_score, precision_score, recall_score
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import FEATURES_FILE, ML_DIR, HORIZONS, MIN_ROWS_TRAIN, SIGNAL_THRESHOLD
 
-SAVED_DIR          = ML_DIR
-TRAIN_RATIO        = 0.80
-VAL_RATIO_OF_TRAIN = 0.15
+SAVED_DIR   = ML_DIR
+TRAIN_RATIO = 0.80
 
 FEATURE_COLS = [
     "price_change_1m", "price_change_30s", "volatility_1m",
@@ -45,6 +45,10 @@ FEATURE_COLS = [
     "funding_long_heavy", "funding_short_heavy",
     "funding_rate_change", "funding_trend_3h",
     "secs_to_next_funding", "funding_urgency",
+    # Spot CVD + Basis (mới — chỉ có từ khi collector update)
+    "spot_cvd_delta_1m", "spot_cvd_delta_30s",
+    "basis_pct", "basis_change_1m", "basis_positive",
+    "cvd_divergence",
 ]
 
 
@@ -56,7 +60,8 @@ def load_labeled_data() -> pd.DataFrame:
 
 def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     X = df[FEATURE_COLS].copy()
-    for col in ("funding_long_heavy", "funding_short_heavy"):
+    bool_cols = ("funding_long_heavy", "funding_short_heavy", "basis_positive")
+    for col in bool_cols:
         if col in X.columns:
             X[col] = X[col].astype(str).map(
                 {"True": 1, "False": 0, "1": 1, "0": 0, "1.0": 1, "0.0": 0}
@@ -65,13 +70,11 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def time_split(df: pd.DataFrame):
-    n       = len(df)
-    n_train = int(n * TRAIN_RATIO)
-    n_val   = int(n_train * VAL_RATIO_OF_TRAIN)
-    return df.iloc[:n_train - n_val], df.iloc[n_train - n_val:n_train], df.iloc[n_train:]
+    n_train = int(len(df) * TRAIN_RATIO)
+    return df.iloc[:n_train], df.iloc[n_train:]
 
 
-# ── Model A: binary classifier ────────────────────────────────────
+# ── Model A: Ensemble classifier (RF + LR + XGBoost_GPU) ──────────
 
 def _train_classifier(df_all: pd.DataFrame, label_col: str, direction: str, horizon: int) -> dict | None:
     if label_col not in df_all.columns:
@@ -97,126 +100,82 @@ def _train_classifier(df_all: pd.DataFrame, label_col: str, direction: str, hori
         print(f"[TRAIN-A]   Không có label=1. Bỏ qua.")
         return None
 
-    df_inner, df_val, df_test = time_split(df)
+    df_inner, df_test = time_split(df)
 
     X_inner = prepare_features(df_inner)
-    X_val   = prepare_features(df_val)
     X_test  = prepare_features(df_test)
     y_inner = df_inner[label_col].values
-    y_val   = df_val[label_col].values
     y_test  = df_test[label_col].values
 
-    imputer     = SimpleImputer(strategy="median")
+    imputer = SimpleImputer(strategy="median")
     X_inner_imp = imputer.fit_transform(X_inner)
-    X_val_imp   = imputer.transform(X_val)
     X_test_imp  = imputer.transform(X_test)
+
+    scaler = StandardScaler()
+    X_inner_sc = scaler.fit_transform(X_inner_imp)
+    X_test_sc  = scaler.transform(X_test_imp)
 
     spw = (y_inner == 0).sum() / max((y_inner == 1).sum(), 1)
 
-    model = LGBMClassifier(
-        n_estimators=500, num_leaves=31, learning_rate=0.05,
-        feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1,
-        min_child_samples=20, scale_pos_weight=spw,
-        random_state=42, verbose=-1, n_jobs=-1,
+    rf = RandomForestClassifier(
+        n_estimators=300, max_depth=10, class_weight="balanced",
+        random_state=42, n_jobs=-1,
     )
-    model.fit(
-        X_inner_imp, y_inner,
-        eval_set=[(X_val_imp, y_val)],
-        callbacks=[early_stopping(30, verbose=False), log_evaluation(-1)],
+    lr = LogisticRegression(
+        class_weight="balanced", max_iter=500, random_state=42,
+    )
+    xgb_model = xgb.XGBClassifier(
+        n_estimators=500, learning_rate=0.05, max_depth=6,
+        scale_pos_weight=spw, subsample=0.8, colsample_bytree=0.8,
+        device="cuda", random_state=42, eval_metric="logloss", verbosity=0,
     )
 
-    prob_test = model.predict_proba(X_test_imp)[:, 1]
-    auc_test  = roc_auc_score(y_test, prob_test) if len(np.unique(y_test)) > 1 else float("nan")
+    rf.fit(X_inner_imp, y_inner)
+    lr.fit(X_inner_sc, y_inner)
+    xgb_model.fit(X_inner_imp, y_inner)
+
+    prob_rf  = rf.predict_proba(X_test_imp)[:, 1]
+    prob_lr  = lr.predict_proba(X_test_sc)[:, 1]
+    prob_xgb = xgb_model.predict_proba(X_test_imp)[:, 1]
+    prob_test = np.mean([prob_rf, prob_lr, prob_xgb], axis=0)
+
+    auc_test = roc_auc_score(y_test, prob_test) if len(np.unique(y_test)) > 1 else float("nan")
+    auc_rf   = roc_auc_score(y_test, prob_rf)   if len(np.unique(y_test)) > 1 else float("nan")
+    auc_lr   = roc_auc_score(y_test, prob_lr)   if len(np.unique(y_test)) > 1 else float("nan")
+    auc_xgb  = roc_auc_score(y_test, prob_xgb)  if len(np.unique(y_test)) > 1 else float("nan")
 
     pred_test = (prob_test >= SIGNAL_THRESHOLD).astype(int)
     n_signals = int(pred_test.sum())
     prec = precision_score(y_test, pred_test, zero_division=0) if n_signals > 0 else 0.0
-    rec  = recall_score(y_test, pred_test, zero_division=0) if n_signals > 0 else 0.0
+    rec  = recall_score(y_test, pred_test, zero_division=0)    if n_signals > 0 else 0.0
 
-    print(f"[TRAIN-A]   AUC test={auc_test:.4f} | @{SIGNAL_THRESHOLD}: signals={n_signals} prec={prec:.3f} rec={rec:.3f}")
+    print(f"[TRAIN-A]   AUC ensemble={auc_test:.4f} (RF={auc_rf:.4f} LR={auc_lr:.4f} XGB={auc_xgb:.4f})")
+    print(f"[TRAIN-A]   @{SIGNAL_THRESHOLD}: signals={n_signals} prec={prec:.3f} rec={rec:.3f}")
 
-    suffix       = f"cascade_{direction}_{horizon}m"
-    model_file   = SAVED_DIR / f"lgb_{suffix}.pkl"
-    imputer_file = SAVED_DIR / f"imputer_{suffix}.pkl"
-    with open(model_file, "wb") as f:
-        pickle.dump(model, f)
-    with open(imputer_file, "wb") as f:
-        pickle.dump(imputer, f)
+    suffix    = f"cascade_{direction}_{horizon}m"
+    ens_file  = SAVED_DIR / f"ens_{suffix}.pkl"
+    artifact  = {
+        "models":  [rf, lr, xgb_model],
+        "imputer": imputer,
+        "scaler":  scaler,
+        "model_names": ["RandomForest", "LogisticReg", "XGBoost_GPU"],
+    }
+    with open(ens_file, "wb") as f:
+        pickle.dump(artifact, f)
 
-    print(f"[TRAIN-A]   Saved → {model_file.name}")
+    print(f"[TRAIN-A]   Saved → {ens_file.name}")
 
     return {
         "n_train": int(len(X_inner)), "n_test": int(len(X_test)),
-        "auc_test": round(float(auc_test), 4) if not np.isnan(auc_test) else None,
-        "precision": round(float(prec), 4), "recall": round(float(rec), 4),
-        "n_signals_test": n_signals, "scale_pos_weight": round(float(spw), 4),
+        "auc_test":     round(float(auc_test), 4) if not np.isnan(auc_test) else None,
+        "auc_rf":       round(float(auc_rf),   4) if not np.isnan(auc_rf)   else None,
+        "auc_lr":       round(float(auc_lr),   4) if not np.isnan(auc_lr)   else None,
+        "auc_xgb":      round(float(auc_xgb),  4) if not np.isnan(auc_xgb)  else None,
+        "precision":    round(float(prec), 4),
+        "recall":       round(float(rec),  4),
+        "n_signals_test": n_signals,
+        "scale_pos_weight": round(float(spw), 4),
     }
-
-
-# ── Model B: regression ────────────────────────────────────────────
-
-def _train_regressor(df_all: pd.DataFrame, direction: str) -> dict | None:
-    ttc_col = f"time_to_cascade_{direction}"
-    if ttc_col not in df_all.columns:
-        print(f"[TRAIN-B] {ttc_col} chưa có — bỏ qua.")
-        return None
-
-    df = df_all.copy()
-    df[ttc_col] = pd.to_numeric(df[ttc_col], errors="coerce")
-    # NaN (no cascade) → NO_CASCADE_VALUE
-    df[ttc_col] = df[ttc_col].fillna(NO_CASCADE_VALUE)
-    df = df.dropna(subset=[ttc_col])
-
-    n_total    = len(df)
-    n_cascade  = (df[ttc_col] < NO_CASCADE_VALUE).sum()
-    print(f"\n[TRAIN-B] ── time_to_cascade_{direction} ──────────────────────")
-    print(f"[TRAIN-B]   Rows: {n_total} | with cascade: {n_cascade}")
-
-    if n_total < MIN_ROWS_TRAIN:
-        print(f"[TRAIN-B]   Cần ít nhất {MIN_ROWS_TRAIN} rows. Bỏ qua.")
-        return None
-    if n_cascade < 20:
-        print(f"[TRAIN-B]   Cần ít nhất 20 cascade rows. Bỏ qua.")
-        return None
-
-    df_inner, df_val, df_test = time_split(df)
-
-    X_inner = prepare_features(df_inner)
-    X_val   = prepare_features(df_val)
-    X_test  = prepare_features(df_test)
-    y_inner = df_inner[ttc_col].values
-    y_val   = df_val[ttc_col].values
-    y_test  = df_test[ttc_col].values
-
-    imputer     = SimpleImputer(strategy="median")
-    X_inner_imp = imputer.fit_transform(X_inner)
-    X_val_imp   = imputer.transform(X_val)
-    X_test_imp  = imputer.transform(X_test)
-
-    model = LGBMRegressor(
-        n_estimators=500, num_leaves=31, learning_rate=0.05,
-        feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1,
-        min_child_samples=20, random_state=42, verbose=-1, n_jobs=-1,
-    )
-    model.fit(
-        X_inner_imp, y_inner,
-        eval_set=[(X_val_imp, y_val)],
-        callbacks=[early_stopping(30, verbose=False), log_evaluation(-1)],
-    )
-
-    pred_test = model.predict(X_test_imp)
-    mae = mean_absolute_error(y_test, pred_test)
-    print(f"[TRAIN-B]   MAE={mae:.2f}m")
-
-    model_file   = SAVED_DIR / f"lgb_ttc_{direction}.pkl"
-    imputer_file = SAVED_DIR / f"imputer_ttc_{direction}.pkl"
-    with open(model_file, "wb") as f:
-        pickle.dump(model, f)
-    with open(imputer_file, "wb") as f:
-        pickle.dump(imputer, f)
-
-    print(f"[TRAIN-B]   Saved → {model_file.name}")
-    return {"n_train": int(len(X_inner)), "n_test": int(len(X_test)), "mae": round(float(mae), 2)}
 
 
 # ── Main ──────────────────────────────────────────────────────────
@@ -256,7 +215,7 @@ def train():
     avg_auc = round(sum(aucs) / len(aucs), 4) if aucs else None
 
     meta = {
-        "model_type":       "LightGBM cascade",
+        "model_type":       "Ensemble cascade (RF+LR+XGBoost_GPU)",
         "feature_cols":     FEATURE_COLS,
         "signal_threshold": SIGNAL_THRESHOLD,
         "trained_at":       pd.Timestamp.now(tz="UTC").isoformat(),

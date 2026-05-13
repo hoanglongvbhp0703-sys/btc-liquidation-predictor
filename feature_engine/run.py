@@ -3,13 +3,13 @@ run.py — Entry point Tầng 2: Feature Engineering + Label Builder
 
 Chạy: python feature_engine/run.py
 
-Scheduler mỗi 5 phút:
-  1. build_feature_row(now)  → append vào features_5m.csv
-  2. build_pending_labels()  → điền label cho row đã đủ 30 phút
+Scheduler mỗi 1 phút:
+  1. build_feature_row(now)  → append vào features_1m.csv
+  2. build_pending_labels()  → điền cascade labels cho row đã đủ 3 phút
 
 Cấu trúc thư mục output:
   data/
-  └── features_5m.csv   ← file này được tạo và cập nhật ở đây
+  └── features_1m.csv   ← file này được tạo và cập nhật ở đây
 """
 
 import csv
@@ -61,8 +61,8 @@ def run_once():
             f"[FE] ✅ Features ghi xong | "
             f"price={row.get('current_price')} | "
             f"imb={row.get('imbalance_now')} | "
-            f"cvd={row.get('cvd_delta_5m')} | "
-            f"dist_upper={row.get('dist_to_upper')}"
+            f"cvd={row.get('cvd_delta_1m')} | "
+            f"liq_total={row.get('liq_total_1m')}"
         )
     except Exception as e:
         print(f"[FE] ❌ Lỗi build features: {e}")

@@ -1,10 +1,10 @@
 """
 run.py — Tầng 5: Signal Output (Cascade Liquidation)
 
-Mỗi 5 phút:
-  1. Đọc feature row mới nhất từ features_5m.csv
-  2. Predict cascade probability + timing
-  3. Nếu cascade_prob >= 0.70 AND time_to_cascade <= 15m → ghi paper trade
+Mỗi 1 phút:
+  1. Đọc feature row mới nhất từ features_1m.csv
+  2. Predict cascade probability + timing (Ensemble RF+LR+XGB)
+  3. Nếu cascade_prob >= 0.70 AND time_to_cascade <= 2m → ghi paper trade
   4. Check outcome trades cũ
   5. In stats mỗi 1 giờ
 """
@@ -26,15 +26,17 @@ from notifier  import notify_signal
 
 from config import FEATURES_FILE, ML_DIR, SIGNAL_THRESHOLD, MIN_ROWS_TRAIN
 
-MODEL_FILE    = ML_DIR / "lgb_cascade_long_3m.pkl"
+MODEL_FILE    = ML_DIR / "ens_cascade_long_3m.pkl"
 RUN_INTERVAL  = 60
 STATS_EVERY   = 60
 MAX_TTC       = 2.0    # chỉ trade khi cascade dự đoán <= 2 phút
 
+_last_model_mtime: float = 0.0
+
 
 def load_latest_feature_row() -> dict | None:
     if not FEATURES_FILE.exists():
-        print("[SIG] features_5m.csv chưa có.")
+        print("[SIG] features_1m.csv chưa có.")
         return None
     try:
         df = pd.read_csv(FEATURES_FILE, dtype=str)
@@ -44,7 +46,7 @@ def load_latest_feature_row() -> dict | None:
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
         return df.iloc[-1].to_dict()
     except Exception as e:
-        print(f"[SIG] Lỗi đọc features_5m.csv: {e}")
+        print(f"[SIG] Lỗi đọc features_1m.csv: {e}")
         return None
 
 
@@ -56,20 +58,29 @@ def _to_float(val) -> float | None:
         return None
 
 
+def _model_mtime() -> float:
+    try:
+        return MODEL_FILE.stat().st_mtime if MODEL_FILE.exists() else 0.0
+    except OSError:
+        return 0.0
+
+
 def run_once(model_ctx: dict | None, cycle: int) -> dict | None:
+    global _last_model_mtime
     now = pd.Timestamp.now(tz="UTC")
     print(f"\n[SIG] ── {now.strftime('%Y-%m-%d %H:%M')} UTC ──")
 
-    if model_ctx is None:
-        if MODEL_FILE.exists():
-            try:
-                model_ctx = load_model()
-                print(f"[SIG] Model loaded | avg_auc={model_ctx['meta'].get('avg_auc_test')}")
-            except Exception as e:
-                print(f"[SIG] Load model lỗi: {e}")
-        else:
-            n = _count_labeled_rows()
-            print(f"[SIG] Model chưa train. cascade_long_30m labeled: {n} (cần {MIN_ROWS_TRAIN}+)")
+    current_mtime = _model_mtime()
+    if MODEL_FILE.exists() and (model_ctx is None or current_mtime > _last_model_mtime):
+        try:
+            model_ctx = load_model()
+            _last_model_mtime = current_mtime
+            print(f"[SIG] Model {'re' if _last_model_mtime else ''}loaded | avg_auc={model_ctx['meta'].get('avg_auc_test')}")
+        except Exception as e:
+            print(f"[SIG] Load model lỗi: {e}")
+    elif model_ctx is None:
+        n = _count_labeled_rows()
+        print(f"[SIG] Model chưa train. cascade_long_3m labeled: {n} (cần {MIN_ROWS_TRAIN}+)")
 
     try:
         n_closed = check_outcomes()

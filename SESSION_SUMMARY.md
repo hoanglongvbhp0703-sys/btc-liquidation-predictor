@@ -13,7 +13,7 @@ feature_engine/ → 38 features mỗi 1 PHÚT → features_1m.csv
         ↓
 label_builder → cascade_long/short_1m/2m/3m
         ↓
-ml/train.py → 6 LGBMClassifier (LONG+SHORT × 3 horizons)
+ml/train.py → Ensemble (RF + LR + XGBoost_GPU) × 6 targets
         ↓
 signal/run.py → paper trading (prob ≥ 0.70 AND ttc ≤ 2m)
         ↓
@@ -22,7 +22,7 @@ server/ (Django + Channels) → dashboard http://localhost:8000
 
 ---
 
-## Trạng thái hiện tại (2026-05-12)
+## Trạng thái hiện tại (2026-05-13)
 
 ### Services (tmux session `btc`)
 | Window | Service | Status |
@@ -37,34 +37,71 @@ server/ (Django + Channels) → dashboard http://localhost:8000
 ### Data
 | File | Rows | Range |
 |---|---|---|
-| `data/features_1m.csv` | ~2,676 | 2026-05-09 10:14 → 2026-05-12 12:36 UTC |
+| `data/features_1m.csv` | ~4,343 | 2026-05-09 → 2026-05-13 UTC |
 
-### Labels (tính đến 2026-05-12 ~12:36 UTC)
-| Label | Labeled | Positives | Base rate |
-|---|---|---|---|
-| cascade_long_1m | 2,674 | 180 | 6.7% |
-| cascade_long_2m | 2,674 | 192 | 7.2% |
-| cascade_long_3m | 2,674 | 191 | 7.1% |
-| cascade_short_1m | 2,674 | 199 | 7.4% |
-| cascade_short_2m | 2,674 | 226 | 8.5% |
-| cascade_short_3m | 2,674 | 221 | 8.3% |
+### Model — Ensemble (RF + LR + XGBoost_GPU)
+AUC dưới đây từ `notebooks/model_selection.ipynb` (80/20 time split, no leakage):
 
-### Model (lần train gần nhất: 2026-05-12 11:44 UTC)
-| Model | AUC test |
-|---|---|
-| long_1m | 0.50 |
-| long_2m | 0.50 |
-| long_3m | 0.61 |
-| short_1m | 0.64 |
-| short_2m | 0.61 |
-| short_3m | 0.59 |
-| **avg** | **0.5749** |
+| Target | Ens_RF+LR+XGB | RF | LR | XGB | LGBM (baseline) |
+|---|---|---|---|---|---|
+| cascade_long_1m  | 0.6127 | 0.6339 | 0.5793 | 0.6181 | 0.6037 |
+| cascade_long_2m  | 0.5732 | 0.6037 | 0.5597 | 0.5876 | 0.5587 |
+| cascade_long_3m  | 0.5759 | 0.5795 | 0.5612 | 0.5912 | 0.5603 |
+| cascade_short_1m | **0.7660** | 0.7674 | 0.7556 | 0.7234 | 0.7080 |
+| cascade_short_2m | **0.7694** | 0.7615 | 0.7581 | 0.7141 | 0.7202 |
+| cascade_short_3m | **0.7553** | 0.7505 | 0.7475 | 0.6681 | 0.6938 |
+| **avg** | **0.6754** | 0.6827 | 0.6602 | 0.6504 | 0.6408 |
 
-AUC ~0.57 — còn thấp, cần ~10,000 rows để meaningful. Auto-train mỗi 60 phút sẽ tự cải thiện.
+- Short targets AUC ≥ 0.70 ✅ — long targets cần thêm data ❌
+- Bootstrap CI: Ens vs LightGBM — short targets **significant** (p<0.05), long targets chưa đủ
+
+### GPU
+- **NVIDIA RTX 3090** (24GB) — XGBoost dùng GPU (`device='cuda'`, ~1s/target)
+- LightGBM không có CUDA → loại khỏi ensemble (chỉ dùng làm baseline so sánh)
 
 ### GitHub
 Repo: `https://github.com/hoanglongvbhp0703-sys/btc-liquidation-predictor`
-Commit mới nhất: `6986696d — refactor: migrate pipeline 5m→1m, horizons [1,2,3]m`
+
+---
+
+## Thay đổi trong session (2026-05-13 — cleanup)
+
+### 1. Đổi model: LightGBM → Ensemble (RF + LR + XGBoost_GPU)
+- `ml/train.py`: train 3 models/target, lưu `ens_cascade_{dir}_{h}m.pkl`
+  - RF: `n_estimators=300, max_depth=10, class_weight='balanced'`
+  - LR: `class_weight='balanced', max_iter=500`
+  - XGB: `n_estimators=500, device='cuda', scale_pos_weight=spw`
+- `ml/predict.py`: avg prob 3 models, fallback về `lgb_*.pkl` nếu tồn tại
+
+### 2. broadcaster.py — cache predictions (mỗi phút, không phải mỗi giây)
+- Thêm `_get_predictions(feat)`: chỉ recompute khi feature timestamp thay đổi
+- Trước: 18 `predict_proba()` calls/giây → Sau: ~1 lần/phút
+
+### 3. signal/run.py — fix references cũ
+- Docstring + error message: `features_5m.csv` → `features_1m.csv`, `5 phút` → `1 phút`
+- `MODEL_FILE`: `lgb_cascade_long_3m.pkl` → `ens_cascade_long_3m.pkl`
+
+### 4. notebooks/ — dọn dẹp + viết lại
+- Xóa: `compare_models.ipynb`, `compare_all_models.ipynb`, `compare_all_models_output.ipynb`, `.py` scripts, `catboost_info/`
+- Giữ: `model_selection.ipynb` (442KB, output đầy đủ) + `compare_all_auc.png` + `roc_curves.png`
+- Fixes trong notebook: data leakage, production hyperparams, ROC curves, Brier, bootstrap CI
+
+### 5. Code cleanup & bug fixes (2026-05-13)
+**Bugs thực sự:**
+- `broadcaster.py`: `MODEL_FILE` trỏ `lgb_cascade_long_3m.pkl` → đổi thành `ens_cascade_long_3m.pkl` (reload model từng bị broken)
+- `data_reader.py` `load_signal_state()`: key `cvd_delta_5m`/`delta_oi_5m` → `cvd_delta_1m`/`delta_oi_1m`
+- `feature_engine/run.py` print: key `cvd_delta_5m`/`dist_to_upper` → `cvd_delta_1m`/`liq_total_1m`
+
+**Dead code removed:**
+- `ml/train.py`: xóa `_train_regressor()` (never called, `NO_CASCADE_VALUE` undefined), xóa import `LGBMRegressor/early_stopping/log_evaluation/mean_absolute_error`
+- `ml/train.py`: đơn giản hóa `time_split()` → 2-way split (val set không được dùng trong classifier)
+- `ml/auto_train.py`: xóa alias thừa `HISTORY_FILE`/`MIN_LABELED`, xóa double `import sys`
+
+**Stale docstrings/strings fixed:**
+- `feature_engine/run.py`: `5 phút`→`1 phút`, `features_5m.csv`→`features_1m.csv`
+- `feature_engine/label_builder.py`: horizons `{5..30}`→`{1,2,3}`, `features_5m.csv`→`features_1m.csv`
+- `ml/auto_train.py`: print `features_5m.csv`→`features_1m.csv`
+- `ml/predict.py`: `model_info()` in `/6`→`/3`; xóa `ttc_long`/`ttc_short` khỏi ctx
 
 ---
 
@@ -84,14 +121,11 @@ LOOKBACK_MINUTES  = 30
 MIN_LIQ_THRESHOLD = 10_000  # $10k/min
 # cascade = 1 nếu sum(liq[T→T+Xm]) > 3 × avg_per_min × X
 
-# predict.py
+# predict.py (ensemble)
 CASCADE_TP_PCT = 0.008   # +0.8%
 CASCADE_SL_PCT = 0.005   # -0.5%
 max_ttc        = 2.0     # minutes
-
-# signal/run.py
-MODEL_FILE   = ml/artifacts/lgb_cascade_long_3m.pkl
-RUN_INTERVAL = 60
+# Ensemble: avg(RF_prob, LR_prob, XGB_prob) >= 0.70
 
 # paper_log.py
 OUTCOME_WINDOW = timedelta(minutes=3)
@@ -141,59 +175,23 @@ R:R = 1.6
 
 ---
 
-## Migration quan trọng đã thực hiện: 5m → 1m
-
-| Hạng mục | Trước | Sau |
-|---|---|---|
-| Feature granularity | 5 phút | **1 phút** |
-| Prediction horizons | [5,10,15,20,25,30]m | **[1, 2, 3]m** |
-| Features file | features_5m.csv | **features_1m.csv** |
-| TP / SL | +1.5% / -1.0% | **+0.8% / -0.5%** |
-| max_ttc | 15m | **2m** |
-| OUTCOME_WINDOW | 30m | **3m** |
-| Models | 12 classifier + 2 regressor | **6 classifier** |
-| Rows/day | ~288 | **~1,440** |
-
-**Lý do:** cascade thật xảy ra trong vài giây → 2 phút. 5m quá chậm.
-
----
-
-## Bugs đã fix (tất cả sessions)
-
-1. `auto_train check_stable()`: logic sai → removed hard-stop, `history["stable"] = False` at startup
-2. Feature engine: kill duplicate process
-3. Server `urls.py`: remove `test_page` route → AttributeError
-4. Signal: kill old process
-5. `paper_log.py check_outcomes()`: fix SHORT direction
-6. `paper_log.py`: thêm `close` column cho EXPIRED pnl
-7. Feature engine: restart để load code mới (Python import cache)
-8. Label threshold: sai per-hour → fix thành per-minute
-9. Label print bug: `str.match(r"^[01]$")` fail trên float64 → `pd.to_numeric().isin([0,1])`
-10. Dashboard table header: `TP (+1.5%)` → `TP (+0.8%)`, `SL (-1.0%)` → `SL (-0.5%)`
-
----
-
 ## Việc cần làm tiếp theo
 
-### Ngắn hạn — pipeline tự chạy, không cần can thiệp
-- Collector tích lũy ~1,440 rows/ngày
-- Auto-train retrain mỗi 60 phút với data mới
-- AUC sẽ cải thiện dần khi data tăng
+### Mục tiêu validation
+| Condition | Status |
+|---|---|
+| AUC short ≥ 0.70 | ✅ đạt (0.74–0.77) |
+| AUC long ≥ 0.65 | ❌ chưa (0.57–0.61) |
+| Precision@0.70 ≥ 50% | ❌ cần kiểm tra sau 50+ signals |
+| Paper trading win rate ≥ 55% sau 50 trades | ❌ chưa đủ trades |
 
-### Mục tiêu data
-| Rows | Dự kiến đạt | Kỳ vọng AUC |
-|---|---|---|
-| ~2,676 (hiện tại) | — | 0.57 |
-| ~10,000 | +5 ngày | 0.65+ |
-| ~20,000 | +12 ngày | 0.70+ |
-
-### Khi AUC ≥ 0.65
+### Khi có đủ paper trades (≥ 50)
 - Walk-forward backtest thủ công
-- Xác minh precision@0.7 ≥ 60%
-- Check paper trading win rate ≥ 55% sau 50 trades
+- Xác minh precision@0.7 ≥ 50%
+- Nếu pass → live vốn nhỏ (5-10% tổng vốn, đòn bẩy 3-5x)
 
 ### Roadmap dài hạn
-- [ ] Optuna hyperparameter tuning
+- [ ] Optuna hyperparameter tuning cho ensemble
 - [ ] Walk-forward backtesting module
 - [ ] Live PnL thay paper trading
 - [ ] Multi-symbol (ETH, SOL)
@@ -212,12 +210,11 @@ tmux send-keys -t btc:features  ".venv/bin/python feature_engine/run.py" ENTER
 tmux send-keys -t btc:signal    ".venv/bin/python signal/run.py" ENTER
 tmux send-keys -t btc:autotrain ".venv/bin/python ml/auto_train.py" ENTER
 
-# Nếu btc:signal chưa tồn tại
-tmux new-window -t btc -n signal
-tmux send-keys -t btc:signal ".venv/bin/python signal/run.py" ENTER
+# Server (phải chạy từ server/)
+cd /home/coder/server && /home/coder/.venv/bin/daphne -b 0.0.0.0 -p 8000 btc_dashboard.asgi:application
 
-# Train thủ công
-.venv/bin/python ml/train.py
+# Train thủ công (ensemble)
+cd /home/coder && .venv/bin/python ml/train.py
 
 # Fill labels thủ công
 .venv/bin/python feature_engine/label_builder.py
@@ -235,19 +232,24 @@ feature_engine/
   build_features.py                ← 38 features → features_1m.csv
   label_builder.py                 ← cascade labels 1/2/3m
 ml/
-  train.py                         ← 6 LGBMClassifier
-  predict.py                       ← load_model(), predict_cascade_*()
+  train.py                         ← Ensemble (RF + LR + XGBoost_GPU) × 6 targets
+  predict.py                       ← load_model(), predict_cascade_*(), avg ensemble prob
   auto_train.py                    ← retrain mỗi 60 phút
-  artifacts/                       ← lgb_cascade_*.pkl, meta.json (gitignored)
+  artifacts/                       ← ens_cascade_*.pkl, meta.json (gitignored)
 signal/
   run.py                           ← inference 60s, paper trade entry
   paper_log.py                     ← ghi + check outcome WIN/LOSS/EXPIRED
 server/
-  dashboard/broadcaster.py         ← push WS tick mỗi 1s
+  dashboard/broadcaster.py         ← push WS tick 1s, predict cache per feat timestamp
   dashboard/data_reader.py         ← đọc CSV → dict
   static/js/signal.js              ← prob bar, curve chart, countdown 3m
 data/
   raw/klines_1s.csv                ← price data 1s
   raw/liquidations.csv             ← liquidation events
-  processed/features_1m.csv        ← 38 features + cascade labels
+  features_1m.csv                  ← 38 features + cascade labels
+notebooks/
+  model_selection.ipynb            ← model comparison duy nhất (442KB, output đầy đủ)
+  compare_all_auc.png              ← AUC bar chart
+  roc_curves.png                   ← ROC curves 6 targets
+.vscode/settings.json              ← port 8000 label "BTC Dashboard"
 ```

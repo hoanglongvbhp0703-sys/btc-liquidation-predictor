@@ -3,11 +3,11 @@ broadcaster.py — Background thread: đọc data mỗi 1s → push WebSocket
 
 Tick payload:
   price, price_change_pct, ts
-  imbalance, cvd_5m, funding_rate, delta_oi_5m
-  cascade_prob_long, cascade_prob_short    — P(cascade trong 30m)
-  cascade_curve_long, cascade_curve_short  — {5→p, ..., 30→p}
+  imbalance, cvd_1m, funding_rate, delta_oi_1m
+  cascade_prob_long, cascade_prob_short    — P(cascade trong 3m)
+  cascade_curve_long, cascade_curve_short  — {1→p, 2→p, 3→p}
   time_to_cascade_long, time_to_cascade_short — ước tính phút
-  cascade_signal_long, cascade_signal_short   — signal dict | None
+  cascade_signal — signal dict | None
 """
 
 import sys
@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT_DIR  = Path(__file__).parent.parent.parent
 MODEL_DIR = ROOT_DIR / "ml"
-MODEL_FILE = MODEL_DIR / "artifacts" / "lgb_cascade_long_3m.pkl"
+MODEL_FILE = MODEL_DIR / "artifacts" / "ens_cascade_long_3m.pkl"
 
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
@@ -29,6 +29,10 @@ _model_mtime = None
 _prev_price  = None
 _started     = False
 _lock        = threading.Lock()
+
+# Cache predictions per feature-row timestamp — re-run model only when features update (~1 min)
+_pred_cache: dict = {}
+_pred_cache_ts: str | None = None
 
 
 def _current_model_mtime() -> float | None:
@@ -53,7 +57,7 @@ def _try_load_model():
 
 
 def _predict_cascade(feature_row: dict, direction: str) -> tuple[float | None, dict, float | None]:
-    """Returns (prob_30m, curve_dict, time_to_cascade)."""
+    """Returns (prob, curve_dict, time_to_cascade)."""
     if _model_ctx is None:
         return None, {}, None
     try:
@@ -64,6 +68,38 @@ def _predict_cascade(feature_row: dict, direction: str) -> tuple[float | None, d
         return prob, curve, ttc
     except Exception:
         return None, {}, None
+
+
+def _get_predictions(feat: dict) -> tuple:
+    """Run model predictions, caching result per feature timestamp.
+
+    Features update every ~60s — no need to run the ensemble on every 1s tick.
+    Returns (prob_long, curve_long, ttc_long, prob_short, curve_short, ttc_short).
+    """
+    global _pred_cache, _pred_cache_ts
+
+    feat_ts = feat.get("timestamp") if feat else None
+
+    if feat_ts is not None and feat_ts == _pred_cache_ts:
+        return (
+            _pred_cache.get("prob_long"),
+            _pred_cache.get("curve_long", {}),
+            _pred_cache.get("ttc_long"),
+            _pred_cache.get("prob_short"),
+            _pred_cache.get("curve_short", {}),
+            _pred_cache.get("ttc_short"),
+        )
+
+    prob_long,  curve_long,  ttc_long  = _predict_cascade(feat, "long")
+    prob_short, curve_short, ttc_short = _predict_cascade(feat, "short")
+
+    _pred_cache_ts = feat_ts
+    _pred_cache = {
+        "prob_long":   prob_long,  "curve_long":  curve_long,  "ttc_long":  ttc_long,
+        "prob_short":  prob_short, "curve_short": curve_short, "ttc_short": ttc_short,
+    }
+
+    return prob_long, curve_long, ttc_long, prob_short, curve_short, ttc_short
 
 
 def _predict_signal(feature_row: dict, price: float) -> dict | None:
@@ -121,8 +157,9 @@ def _build_tick() -> dict:
 
     cvd_1m = round(_f(feat, "cvd_delta_1m") or 0.0, 2)
 
-    prob_long,  curve_long,  ttc_long  = (_predict_cascade(feat, "long")  if feat else (None, {}, None))
-    prob_short, curve_short, ttc_short = (_predict_cascade(feat, "short") if feat else (None, {}, None))
+    prob_long, curve_long, ttc_long, prob_short, curve_short, ttc_short = (
+        _get_predictions(feat) if feat else (None, {}, None, None, {}, None)
+    )
 
     # Signal: ưu tiên paper trade đang mở
     active_paper = read_active_signal()

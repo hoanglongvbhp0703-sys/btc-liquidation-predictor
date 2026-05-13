@@ -1,12 +1,14 @@
 """
 predict.py — Cascade liquidation prediction
 
+Ensemble = RandomForest + LogisticRegression + XGBoost_GPU
+avg prob của 3 models → AUC cao hơn LightGBM đơn ~0.06
+
 API:
     ctx = load_model()
-    prob = predict_cascade_prob(ctx, feature_row, "long")   # P(cascade trong 30m)
-    curve = predict_cascade_curve(ctx, feature_row, "long") # {5:p, 10:p, ..., 30:p}
-    minutes = predict_time_to_cascade(ctx, feature_row, "long")  # ước tính phút
-    signal = predict_cascade_signal(ctx, feature_row, price)     # dict | None
+    prob = predict_cascade_prob(ctx, feature_row, "long")
+    curve = predict_cascade_curve(ctx, feature_row, "long")
+    signal = predict_cascade_signal(ctx, feature_row, price)
 """
 
 import json
@@ -24,18 +26,49 @@ SAVED_DIR = BASE_DIR / "artifacts"
 META_FILE = SAVED_DIR / "meta.json"
 
 HORIZONS         = [1, 2, 3]
-CASCADE_TP_PCT   = 0.008   # +0.8%
-CASCADE_SL_PCT   = 0.005   # -0.5%
+CASCADE_TP_PCT   = 0.008
+CASCADE_SL_PCT   = 0.005
 
 
-def _load_artifact(model_file: Path, imputer_file: Path) -> dict | None:
-    if not model_file.exists() or not imputer_file.exists():
-        return None
-    with open(model_file, "rb") as f:
-        model = pickle.load(f)
-    with open(imputer_file, "rb") as f:
-        imputer = pickle.load(f)
-    return {"model": model, "imputer": imputer}
+def _load_artifact(suffix: str) -> dict | None:
+    """Load ensemble artifact. Falls back to legacy lgb pkl if ensemble not found."""
+    ens_file = SAVED_DIR / f"ens_{suffix}.pkl"
+    if ens_file.exists():
+        with open(ens_file, "rb") as f:
+            return {"ensemble": pickle.load(f)}
+
+    # fallback: legacy LightGBM single model
+    lgb_file     = SAVED_DIR / f"lgb_{suffix}.pkl"
+    imputer_file = SAVED_DIR / f"imputer_{suffix}.pkl"
+    if lgb_file.exists() and imputer_file.exists():
+        with open(lgb_file, "rb") as f:
+            model = pickle.load(f)
+        with open(imputer_file, "rb") as f:
+            imputer = pickle.load(f)
+        return {"legacy": {"model": model, "imputer": imputer}}
+
+    return None
+
+
+def _predict_proba_from_artifact(artifact: dict, X_raw: np.ndarray) -> float:
+    """Trả về prob từ ensemble hoặc legacy model."""
+    if "ensemble" in artifact:
+        ens     = artifact["ensemble"]
+        imputer = ens["imputer"]
+        scaler  = ens["scaler"]
+        models  = ens["models"]   # [RF, LR, XGB]
+        X_imp   = imputer.transform(X_raw)
+        X_sc    = scaler.transform(X_imp)
+        probs   = []
+        for i, m in enumerate(models):
+            X_in = X_sc if i == 1 else X_imp   # index 1 = LogisticReg cần scale
+            probs.append(m.predict_proba(X_in)[0][1])
+        return float(np.mean(probs))
+
+    # legacy LightGBM
+    leg = artifact["legacy"]
+    X_imp = leg["imputer"].transform(X_raw)
+    return float(leg["model"].predict_proba(X_imp)[0][1])
 
 
 def load_model() -> dict:
@@ -51,19 +84,9 @@ def load_model() -> dict:
     short_curves = {}
 
     for h in HORIZONS:
-        long_curves[h] = _load_artifact(
-            SAVED_DIR / f"lgb_cascade_long_{h}m.pkl",
-            SAVED_DIR / f"imputer_cascade_long_{h}m.pkl",
-        )
-        short_curves[h] = _load_artifact(
-            SAVED_DIR / f"lgb_cascade_short_{h}m.pkl",
-            SAVED_DIR / f"imputer_cascade_short_{h}m.pkl",
-        )
+        long_curves[h]  = _load_artifact(f"cascade_long_{h}m")
+        short_curves[h] = _load_artifact(f"cascade_short_{h}m")
 
-    ttc_long  = None
-    ttc_short = None
-
-    # Cần ít nhất 3m model để hoạt động
     if long_curves.get(3) is None:
         raise FileNotFoundError(
             "Model chưa được train. Chạy: python ml/train.py\n"
@@ -73,13 +96,13 @@ def load_model() -> dict:
     n_long  = sum(1 for v in long_curves.values()  if v)
     n_short = sum(1 for v in short_curves.values() if v)
     avg_auc = meta.get("avg_auc_test", "N/A")
+    mtype   = meta.get("model_type", "unknown")
     print(f"[PREDICT] Loaded LONG {n_long}/3 | SHORT {n_short}/3 | avg_auc={avg_auc}")
+    print(f"[PREDICT] Model type: {mtype}")
 
     return {
         "long_curves":  long_curves,
         "short_curves": short_curves,
-        "ttc_long":     ttc_long,
-        "ttc_short":    ttc_short,
         "features":     features,
         "threshold":    threshold,
         "meta":         meta,
@@ -89,9 +112,10 @@ def load_model() -> dict:
 def _build_input(ctx: dict, feature_row: dict) -> np.ndarray:
     features   = ctx["features"]
     row_values = []
+    _bool_cols = {"funding_long_heavy", "funding_short_heavy", "basis_positive"}
     for col in features:
         val = feature_row.get(col)
-        if col in ("funding_long_heavy", "funding_short_heavy"):
+        if col in _bool_cols:
             if isinstance(val, bool):
                 val = int(val)
             elif isinstance(val, str):
@@ -107,17 +131,17 @@ def _build_input(ctx: dict, feature_row: dict) -> np.ndarray:
 
 
 def predict_cascade_prob(ctx: dict, feature_row: dict, direction: str) -> float | None:
-    """P(cascade trong 3m)."""
+    """P(cascade trong 3m) — avg prob của ensemble."""
     curves = ctx.get(f"{direction}_curves", {})
     sub    = curves.get(3)
     if sub is None:
         return None
     X = _build_input(ctx, feature_row)
-    return round(float(sub["model"].predict_proba(sub["imputer"].transform(X))[0][1]), 4)
+    return round(_predict_proba_from_artifact(sub, X), 4)
 
 
 def predict_cascade_curve(ctx: dict, feature_row: dict, direction: str) -> dict:
-    """Xác suất cascade tại từng horizon. {5→p, 10→p, ..., 30→p}"""
+    """Xác suất cascade tại từng horizon {1→p, 2→p, 3→p}."""
     curves = ctx.get(f"{direction}_curves", {})
     X      = _build_input(ctx, feature_row)
     result = {}
@@ -126,7 +150,7 @@ def predict_cascade_curve(ctx: dict, feature_row: dict, direction: str) -> dict:
         if sub is None:
             result[h] = None
             continue
-        result[h] = round(float(sub["model"].predict_proba(sub["imputer"].transform(X))[0][1]), 4)
+        result[h] = round(_predict_proba_from_artifact(sub, X), 4)
     return result
 
 
@@ -200,8 +224,7 @@ def model_info(ctx: dict) -> None:
     print(f"  Threshold   : {meta.get('signal_threshold')}")
     for direction in ("long", "short"):
         n = sum(1 for v in ctx.get(f"{direction}_curves", {}).values() if v)
-        ttc = "✓" if ctx.get(f"ttc_{direction}") else "✗"
-        print(f"  {direction.upper():5}: {n}/6 horizon models | ttc={ttc}")
+        print(f"  {direction.upper():5}: {n}/3 horizon models")
     print("────────────────────────────────────────────────────\n")
 
 

@@ -196,9 +196,9 @@ def load_signal_state() -> dict:
     return {
         "current_price": _f("current_price"),
         "imbalance":     _f("imbalance_now"),
-        "cvd_5m":        _f("cvd_delta_5m"),
+        "cvd_1m":        _f("cvd_delta_1m"),
         "funding_rate":  _f("funding_rate"),
-        "delta_oi_5m":   _f("delta_oi_5m"),
+        "delta_oi_1m":   _f("delta_oi_1m"),
         "feature_ts":    feat.get("timestamp") if feat else None,
         "active_signal": _sig(signal),
     }

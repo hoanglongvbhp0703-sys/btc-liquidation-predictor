@@ -38,7 +38,7 @@ import pandas as pd
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import DATA_DIR
+from config import DATA_DIR, SPOT_AGGTRADE_FILE, BASIS_FILE
 
 
 def _parse_dt(df: pd.DataFrame, col: str) -> pd.DataFrame:
@@ -162,6 +162,43 @@ def load_funding_rate(since=None) -> pd.DataFrame:
     )
     df = _parse_dt(df, "timestamp")
     df = _parse_dt(df, "next_funding_time")
+    if since is not None:
+        df = df[df["timestamp"] >= since]
+    return df.sort_values("timestamp").reset_index(drop=True)
+
+
+def load_spot_aggtrades(since=None) -> pd.DataFrame:
+    """
+    Columns: timestamp, agg_id, price, qty, usd_value, is_buyer_maker, cvd_delta
+    """
+    if not SPOT_AGGTRADE_FILE.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(
+        SPOT_AGGTRADE_FILE,
+        names=["timestamp", "agg_id", "price", "qty",
+               "usd_value", "is_buyer_maker", "cvd_delta"],
+        header=0,
+        dtype={"price": float, "qty": float, "usd_value": float, "cvd_delta": float},
+    )
+    df = _parse_dt(df, "timestamp")
+    if since is not None:
+        df = df[df["timestamp"] >= since]
+    return df.sort_values("timestamp").reset_index(drop=True)
+
+
+def load_basis(since=None) -> pd.DataFrame:
+    """
+    Columns: timestamp, mark_price, index_price, basis_pct
+    """
+    if not BASIS_FILE.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(
+        BASIS_FILE,
+        names=["timestamp", "mark_price", "index_price", "basis_pct"],
+        header=0,
+        dtype={"mark_price": float, "index_price": float, "basis_pct": float},
+    )
+    df = _parse_dt(df, "timestamp")
     if since is not None:
         df = df[df["timestamp"] >= since]
     return df.sort_values("timestamp").reset_index(drop=True)

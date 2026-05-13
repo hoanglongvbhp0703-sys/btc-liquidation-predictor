@@ -14,24 +14,19 @@ from pathlib import Path
 
 import pandas as pd
 
-import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import FEATURES_FILE, META_FILE, TRAIN_HISTORY_FILE, MIN_ROWS_TRAIN
 
-HISTORY_FILE     = TRAIN_HISTORY_FILE
-MIN_LABELED      = MIN_ROWS_TRAIN
-INTERVAL         = 3600   # 1 giờ
-PATIENCE         = 3      # dừng nếu không cải thiện 3 lần liên tiếp
-MIN_DELTA        = 0.001  # cải thiện tối thiểu để tính là "tốt hơn"
+INTERVAL  = 3600   # 1 giờ
+PATIENCE  = 3      # dừng nếu không cải thiện 3 lần liên tiếp
+MIN_DELTA = 0.001  # cải thiện tối thiểu để tính là "tốt hơn"
 
 
 def count_labeled_rows() -> int:
     if not FEATURES_FILE.exists():
         return 0
-    df = pd.read_csv(FEATURES_FILE)
-    col = "cascade_long_3m"
-    if col not in df.columns:
-        col = "label"
+    df  = pd.read_csv(FEATURES_FILE)
+    col = "cascade_long_3m" if "cascade_long_3m" in df.columns else "label"
     if col not in df.columns:
         return 0
     return int(pd.to_numeric(df[col], errors="coerce").isin([0, 1]).sum())
@@ -40,7 +35,7 @@ def count_labeled_rows() -> int:
 def print_data_summary():
     """In tóm tắt dữ liệu gần nhất dùng để train."""
     if not FEATURES_FILE.exists():
-        print("[AUTO-TRAIN] features_5m.csv chưa tồn tại.", flush=True)
+        print("[AUTO-TRAIN] features_1m.csv chưa tồn tại.", flush=True)
         return
     df = pd.read_csv(FEATURES_FILE)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
@@ -81,15 +76,15 @@ def read_avg_auc() -> float | None:
 
 
 def load_history() -> dict:
-    if HISTORY_FILE.exists():
-        with open(HISTORY_FILE) as f:
+    if TRAIN_HISTORY_FILE.exists():
+        with open(TRAIN_HISTORY_FILE) as f:
             return json.load(f)
     return {"runs": [], "stable": False}
 
 
 def save_history(history: dict):
-    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(HISTORY_FILE, "w") as f:
+    TRAIN_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(TRAIN_HISTORY_FILE, "w") as f:
         json.dump(history, f, indent=2)
 
 
@@ -133,7 +128,7 @@ def main():
         n = count_labeled_rows()
         print(f"[AUTO-TRAIN] Labeled rows: {n}/{MIN_LABELED}", flush=True)
 
-        if n >= MIN_LABELED:
+        if n >= MIN_ROWS_TRAIN:
             ok = run_train()
             if ok:
                 auc = read_avg_auc()
@@ -150,7 +145,7 @@ def main():
 
                 save_history(history)
         else:
-            print(f"[AUTO-TRAIN] Chưa đủ data, cần thêm {MIN_LABELED - n} rows.", flush=True)
+            print(f"[AUTO-TRAIN] Chưa đủ data, cần thêm {MIN_ROWS_TRAIN - n} rows.", flush=True)
 
         print(f"[AUTO-TRAIN] Chờ {INTERVAL//60} phút...", flush=True)
         time.sleep(INTERVAL)

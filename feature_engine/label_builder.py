@@ -2,18 +2,18 @@
 label_builder.py — Tầng 3: Build cascade liquidation labels
 
 Cascade LONG (cascade_long_Xm):
-  = 1 nếu sum(liq_short_usd[T→T+Xm]) > 2 × avg_liq_short_1h
+  = 1 nếu sum(liq_short_usd[T→T+Xm]) > 3 × avg_liq_short_pm × X
   Ý nghĩa: SHORT bị liq nhiều → giá TĂNG → LONG trade opportunity
 
 Cascade SHORT (cascade_short_Xm):
-  = 1 nếu sum(liq_long_usd[T→T+Xm]) > 2 × avg_liq_long_1h
+  = 1 nếu sum(liq_long_usd[T→T+Xm]) > 3 × avg_liq_long_pm × X
   Ý nghĩa: LONG bị liq nhiều → giá GIẢM → SHORT trade opportunity
 
 liq_short_usd = usd_value where side == 'BUY'  (SHORT position bị liquidated)
 liq_long_usd  = usd_value where side == 'SELL' (LONG position bị liquidated)
 
 time_to_cascade_long/short:
-  = first h ∈ {5,10,15,20,25,30} where cascade_hm == 1, else NaN
+  = first h ∈ {1, 2, 3} where cascade_hm == 1, else NaN
 """
 
 import pandas as pd
@@ -63,7 +63,7 @@ def _load_liq() -> pd.DataFrame:
 
 def build_pending_labels() -> int:
     if not FEATURES_FILE.exists():
-        print("[LB] features_5m.csv chưa tồn tại.")
+        print("[LB] features_1m.csv chưa tồn tại.")
         return 0
     if not LIQ_FILE.exists():
         print("[LB] liquidations.csv chưa tồn tại.")
