@@ -82,6 +82,9 @@ server:
 monitor:
 	$(PYTHON) scripts/monitor_short.py
 
+validate:
+	$(PYTHON) scripts/signal_validator.py
+
 # ── tmux shortcuts ────────────────────────────────────────────────
 tmux:
 	@tmux has-session -t $(SESSION) 2>/dev/null || tmux new-session -d -s $(SESSION) -n collector
@@ -91,6 +94,7 @@ tmux:
 	@tmux new-window   -t $(SESSION) -n signal     "$(PYTHON) signal/run.py; read"
 	@tmux new-window   -t $(SESSION) -n server     "cd server && $(abspath $(PYTHON)) manage.py runserver 0.0.0.0:8000; read"
 	@tmux new-window   -t $(SESSION) -n monitor    "$(PYTHON) scripts/monitor_short.py; read"
+	@tmux new-window   -t $(SESSION) -n validator  "$(PYTHON) scripts/signal_validator.py; read"
 	@tmux attach -t $(SESSION)
 
 status:
