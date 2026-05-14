@@ -1,15 +1,17 @@
-# Collector
+# ── Data collection ───────────────────────────────────────────────
 websockets==12.0
 aiohttp==3.9.5
-asyncpg==0.29.0
 
-# Data & ML
+# ── Data & ML ─────────────────────────────────────────────────────
 pandas>=2.0
 numpy>=1.26
 scikit-learn>=1.8
-lightgbm>=4.0
 xgboost>=3.0
 
-# Server
+# ── Server ────────────────────────────────────────────────────────
 django>=4.2
 channels[daphne]>=4.0
+
+# ── Dev / testing ─────────────────────────────────────────────────
+pytest
+pytest-django

@@ -6,6 +6,7 @@ Import trong bất kỳ module nào:
     from config import DATA_DIR, FEATURES_FILE, ...
 """
 
+import os
 from pathlib import Path
 
 ROOT_DIR  = Path(__file__).parent
@@ -30,9 +31,9 @@ PAPER_TRADES_FILE = DATA_DIR / "paper_trades.csv"
 META_FILE          = ML_DIR / "meta.json"
 TRAIN_HISTORY_FILE = ML_DIR / "train_history.json"
 
-# ── Trading constants ─────────────────────────────────────────────
-SIGNAL_THRESHOLD = 0.70
-MIN_RR           = 1.5
+# ── Trading constants (override via .env) ────────────────────────
+SIGNAL_THRESHOLD = float(os.getenv("SIGNAL_THRESHOLD", "0.60"))
+MIN_RR           = float(os.getenv("MIN_RR",           "1.5"))
+MIN_ROWS_TRAIN   = int(os.getenv("MIN_ROWS_TRAIN",     "200"))
 HORIZONS         = [1, 2, 3]
-MIN_ROWS_TRAIN   = 200
-RUN_INTERVAL_FE  = 60    # feature engine: mỗi 1 phút
+RUN_INTERVAL_FE  = 60

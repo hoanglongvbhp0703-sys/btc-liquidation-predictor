@@ -1,9 +1,9 @@
-# BTC Liquidation Predictor
+# BTC Cascade Liquidation Predictor
 
-> Real-time machine learning system that predicts whether Bitcoin price will reach the upper liquidation zone within the next 30 minutes.
+> Real-time ML system dự đoán BTC có xảy ra cascade liquidation trong 1/2/3 phút tới không.
 
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org)
-[![LightGBM](https://img.shields.io/badge/model-LightGBM-brightgreen.svg)](https://lightgbm.readthedocs.io)
+[![Model](https://img.shields.io/badge/model-RandomForest-orange.svg)](https://scikit-learn.org)
 [![Django](https://img.shields.io/badge/backend-Django%20Channels-092E20.svg)](https://channels.readthedocs.io)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
@@ -11,16 +11,16 @@
 
 ## Overview
 
-The system streams live market data from Binance Futures, computes 39 engineered features every 5 minutes, and runs a LightGBM classifier to generate a probability score. When the score exceeds the configurable threshold, a signal is fired and logged as a paper trade.
+Hệ thống stream dữ liệu thật từ Binance Futures, tính 46 features mỗi 1 phút, và chạy RandomForest classifier để dự đoán khả năng xảy ra cascade liquidation. Khi xác suất vượt ngưỡng, signal được ghi vào paper trades.
 
-**Key metrics (benchmark on synthetic data)**
+**Kết quả thực tế trên dữ liệu thật (5 ngày Binance)**
 
-| Metric | Value |
-|---|---|
-| AUC-ROC | ~0.82 |
-| Brier Score | ~0.14 |
-| Signal threshold | 0.70 (configurable) |
-| Prediction horizon | 30 minutes |
+| Metric | SHORT signal | LONG signal |
+|---|---|---|
+| AUC-ROC (1m) | 0.766 | 0.671 |
+| Precision @ 0.60 | 93.1% | 95.6% |
+| Recall @ 0.60 | 60.0% | 56.1% |
+| F1 @ 0.60 | 73.0% | 70.7% |
 
 ---
 
@@ -31,36 +31,32 @@ Binance Futures WebSocket / REST
             │
             ▼
 ┌───────────────────┐
-│   collector/      │  Layer 1 — 6 async streams (kline, liquidation,
-│                   │            order book, agg trade, OI, funding)
-└────────┬──────────┘
-         │  data/raw/*.csv
-         ▼
-┌───────────────────┐
-│  feature_engine/  │  Layer 2+3 — 39 features + forward-looking label
-│                   │             (runs every 5 min via cron/loop)
-└────────┬──────────┘
-         │  data/processed/features_5m.csv
-         ▼
-┌───────────────────┐
-│      ml/          │  Layer 4 — LightGBM classifier
-│  train.py         │            TimeSeriesSplit · early stopping
-│  predict.py       │            saved to ml/artifacts/lgb_model.pkl
+│   collector/      │  Layer 1 — 8 async streams → data/*.csv
 └────────┬──────────┘
          │
          ▼
 ┌───────────────────┐
-│    signal/        │  Layer 5 — inference loop + paper trading log
+│  feature_engine/  │  Layer 2+3 — 46 features mỗi 1 phút
+│  label_builder    │             + label cascade_short/long_Xm
 └────────┬──────────┘
-         │  data/processed/paper_trades.csv
+         │  data/features_1m.csv
+         ▼
+┌───────────────────┐
+│      ml/          │  Layer 4 — RandomForest (n=300, balanced)
+│  train.py         │            6 models: SHORT/LONG × 1/2/3m
+│  auto_train.py    │            auto-retrain mỗi 1h
+└────────┬──────────┘
+         │  ml/artifacts/ens_cascade_*_*m.pkl
+         ▼
+┌───────────────────┐
+│    signal/        │  Layer 5 — inference + paper trading
+└────────┬──────────┘
+         │  data/paper_trades.csv
          ▼
 ┌───────────────────┐
 │    server/        │  Layer 6 — Django + Channels WebSocket dashboard
-│  (dashboard)      │            LightweightCharts · real-time price feed
 └───────────────────┘
 ```
-
-All layers communicate through CSV files — no message broker required.
 
 ---
 
@@ -70,53 +66,57 @@ All layers communicate through CSV files — no message broker required.
 btc-liq-predictor/
 ├── collector/              # Layer 1 — Binance WebSocket collectors
 │   ├── main.py             #   Entry point (asyncio multi-stream)
-│   ├── ws_kline.py
-│   ├── ws_liquidation.py
-│   ├── ws_orderbook.py
-│   ├── ws_aggtrade.py
-│   ├── rest_oi.py
-│   ├── rest_funding.py
+│   ├── ws_kline.py         #   klines_1s.csv
+│   ├── ws_liquidation.py   #   liquidations.csv
+│   ├── ws_orderbook.py     #   orderbook.csv
+│   ├── ws_aggtrade.py      #   aggtrades.csv (futures CVD)
+│   ├── ws_spot_aggtrade.py #   spot_aggtrades.csv (spot CVD)
+│   ├── rest_oi.py          #   open_interest.csv
+│   ├── rest_funding.py     #   funding_rate.csv
+│   ├── rest_basis.py       #   basis.csv (futures-spot basis)
 │   └── db.py               #   CSV append helper
 │
-├── feature_engine/         # Layer 2+3 — Feature extraction + labelling
-│   ├── run.py              #   Main loop (every 5 min)
-│   ├── build_features.py
-│   ├── label_builder.py
-│   ├── load_data.py
-│   └── feat_*.py           #   Per-source feature modules
+├── feature_engine/         # Layer 2+3 — Features + labels
+│   ├── run.py              #   Loop mỗi 1 phút
+│   ├── build_features.py   #   Merge 46 features thành 1 row
+│   ├── label_builder.py    #   cascade_short/long_Xm labels
+│   ├── load_data.py        #   CSV readers
+│   └── feat_*.py           #   Per-source feature modules (8 files)
 │
-├── ml/                     # Layer 4 — Model training & inference
-│   ├── train.py            #   LightGBM + TimeSeriesSplit CV
+├── ml/                     # Layer 4 — Training & inference
+│   ├── train.py            #   RandomForest, 6 models, time-split
+│   ├── auto_train.py       #   Auto-retrain mỗi 1h
 │   ├── predict.py          #   load_model() / predict_signal()
-│   └── artifacts/          #   lgb_model.pkl (gitignored)
+│   └── artifacts/          #   ens_cascade_*.pkl + meta.json (gitignored)
 │
 ├── signal/                 # Layer 5 — Signal generation
-│   ├── run.py              #   Inference loop
-│   ├── paper_log.py        #   Paper trade logger
+│   ├── run.py              #   Inference loop mỗi 1 phút
+│   ├── paper_log.py        #   Log + evaluate paper trades
 │   └── notifier.py         #   Telegram alerts (optional)
 │
 ├── server/                 # Layer 6 — Web dashboard
-│   ├── btc_dashboard/      #   Django project settings
+│   ├── btc_dashboard/      #   Django project (settings, asgi, urls)
 │   ├── dashboard/          #   App: views, consumers, broadcaster
-│   ├── static/             #   JS (LightweightCharts, app logic)
+│   ├── static/             #   JS (LightweightCharts, Chart.js)
 │   └── templates/
 │
 ├── scripts/
-│   └── generate_fake_data.py   # Dev: generate synthetic data + train mock model
+│   ├── monitor_short.py    #   Real-time SHORT signal monitor (tmux)
+│   └── rebuild_features.py #   Rebuild features_1m.csv từ raw data
 │
 ├── notebooks/
-│   └── model_comparison.ipynb  # Benchmark: 8 algorithms compared
+│   └── model_selection.ipynb   # Benchmark: RF vs LightGBM vs Ensemble
 │
 ├── tests/
 │   ├── unit/
 │   └── integration/
 │
-├── data/                   # gitignored — created at runtime
-│   ├── raw/
-│   └── processed/
-│
+├── data/                   # gitignored — generated at runtime
 ├── docker/
-│   └── docker-compose.yml
+│   ├── Dockerfile
+│   └── docker-compose.yml  # 5 services: collector, feature_engine,
+│                           #   auto_train, signal, dashboard
+├── config.py               # Single source of truth: paths + constants
 ├── .env.example
 ├── Makefile
 └── pyproject.toml
@@ -124,98 +124,92 @@ btc-liq-predictor/
 
 ---
 
-## Quick Start (Development)
+## Quick Start
 
 ```bash
-# 1. Clone & set up environment
-git clone <repo-url>
-cd btc-liq-predictor
-make setup          # creates .venv + installs all dependencies
+# 1. Setup
+git clone <repo-url> && cd btc-liq-predictor
+make setup
+cp .env.example .env   # set DJANGO_SECRET_KEY
 
-# 2. Configure environment
-cp .env.example .env
-# Edit .env — at minimum set DJANGO_SECRET_KEY
+# 2. Chạy từng service (terminal riêng)
+make collector         # thu thập data Binance
+make features          # build features mỗi 1 phút
+make auto-train        # retrain model mỗi 1h
+make signal            # inference + paper trades
+make server            # dashboard http://localhost:8000
 
-# 3. Generate synthetic data + train mock model
-make fake-data      # writes data/raw/, data/processed/, ml/artifacts/lgb_model.pkl
+# Hoặc dùng tmux (xem cả 5 service cùng lúc)
+make tmux
 
-# 4. Launch dashboard
-make server
-# → http://localhost:8000
+# Hoặc Docker (production)
+make docker-up
 ```
 
 ---
 
-## Production
-
-Each service runs independently in its own terminal or process manager:
+## Giám sát signal SHORT real-time
 
 ```bash
-make collector      # Stream market data from Binance → data/raw/
-make features       # Compute features every 5 min    → data/processed/
-make signal         # Run inference + log paper trades
-make server         # Serve dashboard
+make monitor           # mở monitor trong tmux window hiện tại
 ```
 
-Recommended: collect at least **7–14 days** of real data before training the production model (`make train`).
+Output mỗi 60 giây: bảng TP/FP/FN + Precision/Recall/F1 + tự reload model khi auto_train xong.
 
 ---
 
 ## ML Model
 
-**Algorithm:** LightGBM (`LGBMClassifier`)
+**Algorithm:** RandomForest (`n_estimators=300, max_depth=10, class_weight=balanced`)
 
-**Why LightGBM:** Benchmarked against 8 algorithms (XGBoost, CatBoost, Random Forest, Logistic Regression, SVM, MLP, AdaBoost, GBM) — LightGBM achieved the best AUC-ROC *and* best Brier score (calibration), making it the strongest choice for both ranking and probability estimation.
+**Benchmark:** RF avg AUC 0.70 > LightGBM 0.67 > Ensemble(RF+LR+XGB) 0.66 trên real data.  
+Xem: [`notebooks/model_selection.ipynb`](notebooks/model_selection.ipynb)
 
-See the full benchmark: [`notebooks/model_comparison.ipynb`](notebooks/model_comparison.ipynb)
-
-**Features (39 total):**
+**46 features:**
 
 | Category | Features |
 |---|---|
-| Price | Returns over 5/15/30/60 min windows, volatility, candle patterns |
-| Liquidation zones | Upper/lower zone distance, zone width |
-| Order book | Bid/ask imbalance, depth ratio |
-| CVD | Cumulative volume delta, delta acceleration |
-| Whale activity | Large trade count, large trade volume ratio |
-| Open interest | OI change rate, OI × price |
-| Funding rate | Current rate, rate momentum |
+| Price | price_change_1m/30s, volatility_1m, volume_1m, taker_buy_ratio |
+| Liquidation | liq_long/short_usd_1m, liq_total, liq_ratio, liq_accel_30s |
+| Order book | imbalance_now/avg_1m/trend, spread, bid/ask_vol, wall_ratio |
+| CVD futures | cvd_delta_1m/30s, whale_buy/sell_count/net/usd, whale_dominance |
+| CVD spot | spot_cvd_delta_1m/30s, cvd_divergence |
+| Basis | basis_pct, basis_change_1m, basis_positive |
+| Open interest | delta_oi_1m/30m/1h, oi_acceleration |
+| Funding | funding_rate, funding_bias, long/short_heavy, trend_3h, urgency |
 
-**Label:** Binary — `1` if `max(high[T → T+30min]) ≥ upper_liq_zone`, else `0`
-
-**Training:**
-```bash
-make train          # requires ≥ 200 labeled rows; 2,000+ recommended
-```
+**Label:**
+- `cascade_short_Xm = 1` nếu `min(low[T → T+Xm]) ≤ liq_zone_lower`
+- `cascade_long_Xm  = 1` nếu `max(high[T → T+Xm]) ≥ liq_zone_upper`
 
 ---
 
 ## Environment Variables
 
-Copy `.env.example` to `.env`:
-
 ```bash
 cp .env.example .env
 ```
 
-| Variable | Required | Description |
-|---|---|---|
-| `DJANGO_SECRET_KEY` | Yes | Django secret key |
-| `BINANCE_API_KEY` | No | Needed only for private endpoints |
-| `BINANCE_API_SECRET` | No | Needed only for private endpoints |
-| `TELEGRAM_BOT_TOKEN` | No | Signal alerts via Telegram |
-| `TELEGRAM_CHAT_ID` | No | Target chat for alerts |
-| `SIGNAL_THRESHOLD` | No | Prediction threshold (default: `0.70`) |
+| Variable | Required | Default | Mô tả |
+|---|---|---|---|
+| `DJANGO_SECRET_KEY` | Yes | — | Django secret key |
+| `SIGNAL_THRESHOLD` | No | 0.60 | Ngưỡng probability để bắn signal |
+| `MIN_RR` | No | 1.5 | Tỷ lệ R:R tối thiểu |
+| `TELEGRAM_BOT_TOKEN` | No | — | Telegram alert |
+| `TELEGRAM_CHAT_ID` | No | — | Telegram chat ID |
 
 ---
 
-## Development
+## Commands
 
 ```bash
-make test           # Full test suite (unit + integration)
-make test-unit      # Unit tests only
-make lint           # Flake8
-make clean          # Remove cache files
+make status        # xem trạng thái tất cả services
+make train         # train model thủ công
+make monitor       # giám sát SHORT signal real-time
+make rebuild       # rebuild features_1m.csv từ raw data
+make test          # chạy test suite
+make lint          # flake8
+make clean         # xóa cache
 ```
 
 ---
@@ -224,20 +218,21 @@ make clean          # Remove cache files
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d
+docker compose -f docker/docker-compose.yml logs -f
 ```
 
-Four services: `collector`, `feature_engine`, `signal`, `dashboard`. Shared volumes: `data/` and `ml/artifacts/`.
+5 services: `collector`, `feature_engine`, `auto_train`, `signal`, `dashboard`.
 
 ---
 
 ## Roadmap
 
-- [ ] Accumulate 7–14 days of real Binance data
-- [ ] Retrain LightGBM on real labeled data (target: AUC ≥ 0.75 on live data)
-- [ ] Add Optuna hyperparameter tuning
-- [ ] Walk-forward backtesting module
-- [ ] Live PnL tracking (replace paper trading with simulated fills)
-- [ ] Multi-symbol support (ETH, SOL)
+- [ ] 2-3 tuần paper trading để xác nhận precision/recall trên live data
+- [ ] Walk-forward backtesting (nhiều splits)
+- [ ] Calibrate TP/SL/window cho paper trades (hiện tại: 0.8%/0.5%/3min)
+- [ ] Live PnL thay thế paper trading
+- [ ] Multi-symbol (ETH, SOL)
+- [ ] Optuna hyperparameter tuning
 
 ---
 

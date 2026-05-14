@@ -126,7 +126,7 @@ def main():
     while True:
         print_data_summary()
         n = count_labeled_rows()
-        print(f"[AUTO-TRAIN] Labeled rows: {n}/{MIN_LABELED}", flush=True)
+        print(f"[AUTO-TRAIN] Labeled rows: {n}/{MIN_ROWS_TRAIN}", flush=True)
 
         if n >= MIN_ROWS_TRAIN:
             ok = run_train()
