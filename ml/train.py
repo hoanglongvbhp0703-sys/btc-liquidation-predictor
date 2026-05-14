@@ -1,11 +1,13 @@
 """
 train.py — Tầng 4: Train cascade liquidation models
 
-Ensemble = RandomForest + LogisticRegression + XGBoost(GPU)
-  avg prob của 3 models → tốt hơn LightGBM đơn ~0.06 AUC
+Model = RandomForest (n_estimators=300, class_weight=balanced)
+  Notebook benchmark: RF avg AUC 0.7039 > Ensemble(RF+LR+XGB) 0.6625.
+  Platt scaling thử nghiệm → max_prob ~0.13 (Platt reveal true prob << 0.70).
+  Raw RF prob dùng threshold 0.70 heuristic vẫn cho precision cao hơn khi signal fires.
 
 Artifacts per target: ens_cascade_{direction}_{h}m.pkl
-  chứa {"models": [rf, lr, xgb], "imputer": ..., "scaler": ...}
+  chứa {"models": [rf], "imputer": ..., "model_names": ["RandomForest"]}
 
 Output artifacts: ml/artifacts/
 """
@@ -17,9 +19,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
-import xgboost as xgb
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import roc_auc_score, precision_score, recall_score
 
@@ -74,11 +73,11 @@ def time_split(df: pd.DataFrame):
     return df.iloc[:n_train], df.iloc[n_train:]
 
 
-# ── Model A: Ensemble classifier (RF + LR + XGBoost_GPU) ──────────
+# ── Model: RandomForest ───────────────────────────────────────────
 
 def _train_classifier(df_all: pd.DataFrame, label_col: str, direction: str, horizon: int) -> dict | None:
     if label_col not in df_all.columns:
-        print(f"[TRAIN-A] {direction}/{horizon}m: cột '{label_col}' chưa có — bỏ qua.")
+        print(f"[TRAIN] {direction}/{horizon}m: cột '{label_col}' chưa có — bỏ qua.")
         return None
 
     df = df_all.copy()
@@ -90,14 +89,14 @@ def _train_classifier(df_all: pd.DataFrame, label_col: str, direction: str, hori
     n_positive = (df[label_col] == 1).sum()
     pct1 = f"{n_positive/n_total*100:.1f}%" if n_total > 0 else "N/A"
 
-    print(f"\n[TRAIN-A] ── cascade_{direction} {horizon}m ──────────────────────")
-    print(f"[TRAIN-A]   Rows: {n_total}  pos={n_positive} ({pct1})")
+    print(f"\n[TRAIN] ── cascade_{direction} {horizon}m ──────────────────────")
+    print(f"[TRAIN]   Rows: {n_total}  pos={n_positive} ({pct1})")
 
     if n_total < MIN_ROWS_TRAIN:
-        print(f"[TRAIN-A]   Cần ít nhất {MIN_ROWS_TRAIN} rows. Bỏ qua.")
+        print(f"[TRAIN]   Cần ít nhất {MIN_ROWS_TRAIN} rows. Bỏ qua.")
         return None
     if n_positive == 0:
-        print(f"[TRAIN-A]   Không có label=1. Bỏ qua.")
+        print(f"[TRAIN]   Không có label=1. Bỏ qua.")
         return None
 
     df_inner, df_test = time_split(df)
@@ -111,70 +110,42 @@ def _train_classifier(df_all: pd.DataFrame, label_col: str, direction: str, hori
     X_inner_imp = imputer.fit_transform(X_inner)
     X_test_imp  = imputer.transform(X_test)
 
-    scaler = StandardScaler()
-    X_inner_sc = scaler.fit_transform(X_inner_imp)
-    X_test_sc  = scaler.transform(X_test_imp)
-
-    spw = (y_inner == 0).sum() / max((y_inner == 1).sum(), 1)
-
     rf = RandomForestClassifier(
         n_estimators=300, max_depth=10, class_weight="balanced",
         random_state=42, n_jobs=-1,
     )
-    lr = LogisticRegression(
-        class_weight="balanced", max_iter=500, random_state=42,
-    )
-    xgb_model = xgb.XGBClassifier(
-        n_estimators=500, learning_rate=0.05, max_depth=6,
-        scale_pos_weight=spw, subsample=0.8, colsample_bytree=0.8,
-        device="cuda", random_state=42, eval_metric="logloss", verbosity=0,
-    )
-
     rf.fit(X_inner_imp, y_inner)
-    lr.fit(X_inner_sc, y_inner)
-    xgb_model.fit(X_inner_imp, y_inner)
 
-    prob_rf  = rf.predict_proba(X_test_imp)[:, 1]
-    prob_lr  = lr.predict_proba(X_test_sc)[:, 1]
-    prob_xgb = xgb_model.predict_proba(X_test_imp)[:, 1]
-    prob_test = np.mean([prob_rf, prob_lr, prob_xgb], axis=0)
-
-    auc_test = roc_auc_score(y_test, prob_test) if len(np.unique(y_test)) > 1 else float("nan")
-    auc_rf   = roc_auc_score(y_test, prob_rf)   if len(np.unique(y_test)) > 1 else float("nan")
-    auc_lr   = roc_auc_score(y_test, prob_lr)   if len(np.unique(y_test)) > 1 else float("nan")
-    auc_xgb  = roc_auc_score(y_test, prob_xgb)  if len(np.unique(y_test)) > 1 else float("nan")
+    prob_test = rf.predict_proba(X_test_imp)[:, 1]
+    auc_test  = roc_auc_score(y_test, prob_test) if len(np.unique(y_test)) > 1 else float("nan")
 
     pred_test = (prob_test >= SIGNAL_THRESHOLD).astype(int)
     n_signals = int(pred_test.sum())
     prec = precision_score(y_test, pred_test, zero_division=0) if n_signals > 0 else 0.0
     rec  = recall_score(y_test, pred_test, zero_division=0)    if n_signals > 0 else 0.0
 
-    print(f"[TRAIN-A]   AUC ensemble={auc_test:.4f} (RF={auc_rf:.4f} LR={auc_lr:.4f} XGB={auc_xgb:.4f})")
-    print(f"[TRAIN-A]   @{SIGNAL_THRESHOLD}: signals={n_signals} prec={prec:.3f} rec={rec:.3f}")
+    print(f"[TRAIN]   AUC={auc_test:.4f}  max_prob={prob_test.max():.3f}  @{SIGNAL_THRESHOLD}: signals={n_signals} prec={prec:.3f} rec={rec:.3f}")
 
-    suffix    = f"cascade_{direction}_{horizon}m"
-    ens_file  = SAVED_DIR / f"ens_{suffix}.pkl"
-    artifact  = {
-        "models":  [rf, lr, xgb_model],
-        "imputer": imputer,
-        "scaler":  scaler,
-        "model_names": ["RandomForest", "LogisticReg", "XGBoost_GPU"],
+    suffix   = f"cascade_{direction}_{horizon}m"
+    ens_file = SAVED_DIR / f"ens_{suffix}.pkl"
+    artifact = {
+        "models":      [rf],
+        "imputer":     imputer,
+        "model_names": ["RandomForest"],
     }
     with open(ens_file, "wb") as f:
         pickle.dump(artifact, f)
 
-    print(f"[TRAIN-A]   Saved → {ens_file.name}")
+    print(f"[TRAIN]   Saved → {ens_file.name}")
 
     return {
-        "n_train": int(len(X_inner)), "n_test": int(len(X_test)),
-        "auc_test":     round(float(auc_test), 4) if not np.isnan(auc_test) else None,
-        "auc_rf":       round(float(auc_rf),   4) if not np.isnan(auc_rf)   else None,
-        "auc_lr":       round(float(auc_lr),   4) if not np.isnan(auc_lr)   else None,
-        "auc_xgb":      round(float(auc_xgb),  4) if not np.isnan(auc_xgb)  else None,
-        "precision":    round(float(prec), 4),
-        "recall":       round(float(rec),  4),
+        "n_train":        int(len(X_inner)),
+        "n_test":         int(len(X_test)),
+        "auc_test":       round(float(auc_test), 4) if not np.isnan(auc_test) else None,
+        "max_prob":       round(float(prob_test.max()), 4),
+        "precision":      round(float(prec), 4),
+        "recall":         round(float(rec),  4),
         "n_signals_test": n_signals,
-        "scale_pos_weight": round(float(spw), 4),
     }
 
 
@@ -215,7 +186,7 @@ def train():
     avg_auc = round(sum(aucs) / len(aucs), 4) if aucs else None
 
     meta = {
-        "model_type":       "Ensemble cascade (RF+LR+XGBoost_GPU)",
+        "model_type":       "RandomForest cascade",
         "feature_cols":     FEATURE_COLS,
         "signal_threshold": SIGNAL_THRESHOLD,
         "trained_at":       pd.Timestamp.now(tz="UTC").isoformat(),

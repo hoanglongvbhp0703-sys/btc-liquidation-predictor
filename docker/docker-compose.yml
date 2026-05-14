@@ -41,6 +41,13 @@ services:
     command: python signal/run.py
     depends_on: [feature_engine]
 
+  # ── Layer 4: Auto Train (retrain mỗi 1h) ─────────────────────
+  auto_train:
+    <<: *common
+    container_name: btc_autotrain
+    command: python ml/auto_train.py
+    depends_on: [feature_engine]
+
   # ── Layer 6: Dashboard ────────────────────────────────────────
   dashboard:
     <<: *common

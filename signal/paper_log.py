@@ -95,9 +95,6 @@ def check_outcomes() -> int:
         try:
             klines = pd.read_csv(
                 KLINES_FILE,
-                names=["open_time", "open", "high", "low", "close",
-                       "volume", "taker_buy_vol", "num_trades"],
-                header=None,
                 dtype={"high": float, "low": float, "close": float},
                 usecols=["open_time", "high", "low", "close"],
             )

@@ -1,8 +1,8 @@
 """
 predict.py — Cascade liquidation prediction
 
-Ensemble = RandomForest + LogisticRegression + XGBoost_GPU
-avg prob của 3 models → AUC cao hơn LightGBM đơn ~0.06
+Model = RandomForest + Platt scaling (artifact: ens_cascade_{dir}_{h}m.pkl)
+Falls back to legacy LightGBM pkl if RF artifact missing.
 
 API:
     ctx = load_model()
@@ -51,22 +51,26 @@ def _load_artifact(suffix: str) -> dict | None:
 
 
 def _predict_proba_from_artifact(artifact: dict, X_raw: np.ndarray) -> float:
-    """Trả về prob từ ensemble hoặc legacy model."""
+    """Trả về prob từ RF artifact hoặc legacy LightGBM."""
     if "ensemble" in artifact:
-        ens     = artifact["ensemble"]
-        imputer = ens["imputer"]
-        scaler  = ens["scaler"]
-        models  = ens["models"]   # [RF, LR, XGB]
-        X_imp   = imputer.transform(X_raw)
-        X_sc    = scaler.transform(X_imp)
-        probs   = []
+        ens         = artifact["ensemble"]
+        imputer     = ens["imputer"]
+        models      = ens["models"]
+        model_names = ens.get("model_names", [])
+        X_imp       = imputer.transform(X_raw)
+
+        scaler = ens.get("scaler")
+        X_sc   = scaler.transform(X_imp) if scaler is not None else None
+
+        probs = []
         for i, m in enumerate(models):
-            X_in = X_sc if i == 1 else X_imp   # index 1 = LogisticReg cần scale
+            name = model_names[i] if i < len(model_names) else ""
+            X_in = X_sc if (name == "LogisticReg" and X_sc is not None) else X_imp
             probs.append(m.predict_proba(X_in)[0][1])
         return float(np.mean(probs))
 
     # legacy LightGBM
-    leg = artifact["legacy"]
+    leg   = artifact["legacy"]
     X_imp = leg["imputer"].transform(X_raw)
     return float(leg["model"].predict_proba(X_imp)[0][1])
 
