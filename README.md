@@ -13,14 +13,58 @@
 
 Hệ thống stream dữ liệu thật từ Binance Futures, tính 46 features mỗi 1 phút, và chạy RandomForest classifier để dự đoán khả năng xảy ra cascade liquidation. Khi xác suất vượt ngưỡng, signal được ghi vào paper trades.
 
-**Kết quả thực tế trên dữ liệu thật (5 ngày Binance)**
+---
 
-| Metric | SHORT signal | LONG signal |
+## Kết quả hiện tại
+
+> **Dataset:** 5,335 rows labeled · 5 ngày thật từ Binance (09–14/05/2026)  
+> **Model:** RandomForest `n_estimators=300, max_depth=10, class_weight=balanced`  
+> **Retrain:** tự động mỗi 1h (`ml/auto_train.py`)  
+> **Threshold:** 0.60 (configurable qua `.env`)
+
+### AUC-ROC — out-of-sample (test set, 20% cuối theo thời gian)
+
+| Direction | 1m | 2m | 3m |
+|---|---|---|---|
+| SHORT | **0.770** | 0.741 | 0.735 |
+| LONG  | 0.668 | 0.634 | 0.627 |
+
+> AUC > 0.70 trên SHORT là benchmark tốt cho tín hiệu ngắn hạn 1 phút.  
+> AUC LONG ~0.65 — đủ để trade nhưng cần thêm dữ liệu để cải thiện.
+
+### Precision / Recall — test set (1,067 rows, 05/13→05/14)
+
+| Threshold | SHORT Prec | SHORT Recall | SHORT F1 | LONG Prec | LONG Recall | LONG F1 |
+|---|---|---|---|---|---|---|
+| 0.50 | 49.4% | 30.1% | 37.4% | 16.0% | 3.7% | 6.0% |
+| 0.55 | 53.4% | 21.2% | 30.4% | 40.0% | 3.7% | 6.8% |
+| **0.60** ← current | **56.8%** | **14.4%** | **23.0%** | **42.9%** | **2.8%** | **5.2%** |
+| 0.65 | 60.0% | 12.3% | 20.5% | 66.7% | 1.9% | 3.6% |
+| 0.70 | 62.5% | 6.8% | 12.3% | 100% | 0.9% | 1.8% |
+
+> **Lưu ý:** Test set chỉ có 1,067 rows (~30h), số signal nhỏ (37 @ 0.60 cho SHORT).  
+> Các chỉ số sẽ ổn định hơn khi tích lũy thêm 2–4 tuần data.
+
+### So sánh: in-sample vs out-of-sample
+
+| | SHORT in-sample | SHORT out-of-sample |
 |---|---|---|
-| AUC-ROC (1m) | 0.766 | 0.671 |
-| Precision @ 0.60 | 93.1% | 95.6% |
-| Recall @ 0.60 | 60.0% | 56.1% |
-| F1 @ 0.60 | 73.0% | 70.7% |
+| Precision @ 0.60 | 93.1% | 56.8% |
+| Recall @ 0.60 | 60.0% | 14.4% |
+
+> Gap lớn giữa in-sample và out-of-sample = dấu hiệu overfitting nhẹ.  
+> Nguyên nhân: chỉ 5 ngày data, một market regime (BTC sideways $79K).  
+> Giải pháp: tích lũy data từ nhiều regime khác nhau (trending, high volatility).
+
+### Paper Trading (đang chạy)
+
+| Trades | WIN | LOSS | EXPIRED | Total PnL | Avg PnL/trade |
+|---|---|---|---|---|---|
+| 5 | 0 | 0 | 5 | +0.25% | +0.05% |
+
+> Tất cả EXPIRED = giá không chạm TP (0.8%) cũng không chạm SL (0.5%) trong 3 phút.  
+> TP/SL/window cần calibrate dựa trên thêm dữ liệu thực tế.  
+> **Chưa đủ dữ liệu để đánh giá live performance** — cần tối thiểu 20–30 trades có outcome.
 
 ---
 
