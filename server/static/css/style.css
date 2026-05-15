@@ -110,7 +110,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .section-title {
