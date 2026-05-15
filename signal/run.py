@@ -27,11 +27,13 @@ from notifier  import notify_signal
 from config import FEATURES_FILE, ML_DIR, SIGNAL_THRESHOLD, MIN_ROWS_TRAIN
 
 MODEL_FILE    = ML_DIR / "ens_cascade_long_3m.pkl"
-RUN_INTERVAL  = 60
+RUN_INTERVAL  = 10
 STATS_EVERY   = 60
 MAX_TTC       = 2.0    # chỉ trade khi cascade dự đoán <= 2 phút
+SIGNAL_COOLDOWN = 180  # giây — tránh log trùng cùng 1 signal nhiều lần
 
 _last_model_mtime: float = 0.0
+_last_signal_ts:   float = 0.0  # epoch seconds của signal gần nhất
 
 
 def load_latest_feature_row() -> dict | None:
@@ -110,9 +112,16 @@ def run_once(model_ctx: dict | None, cycle: int) -> dict | None:
         return model_ctx
 
     if signal:
-        opened_at = pd.Timestamp.now(tz="UTC")
-        log_signal(signal, opened_at)
-        notify_signal(signal, opened_at)
+        global _last_signal_ts
+        now_epoch = pd.Timestamp.now(tz="UTC").timestamp()
+        if now_epoch - _last_signal_ts >= SIGNAL_COOLDOWN:
+            opened_at = pd.Timestamp.now(tz="UTC")
+            log_signal(signal, opened_at)
+            notify_signal(signal, opened_at)
+            _last_signal_ts = now_epoch
+        else:
+            remain = int(SIGNAL_COOLDOWN - (now_epoch - _last_signal_ts))
+            print(f"[SIG] Signal detected nhưng còn cooldown {remain}s — bỏ qua")
     else:
         print(f"[SIG] Không có signal (threshold={SIGNAL_THRESHOLD}, max_ttc={MAX_TTC}m)")
 
@@ -138,7 +147,7 @@ def main():
     print("""
 ╔══════════════════════════════════════════════╗
 ║   BTC Cascade Signal — Tầng 5              ║
-║   Chạy mỗi 1 phút                          ║
+║   Chạy mỗi 10 giây                         ║
 ╚══════════════════════════════════════════════╝
     """)
 
@@ -147,11 +156,7 @@ def main():
     model_ctx = run_once(model_ctx, cycle)
 
     while True:
-        now      = pd.Timestamp.now(tz="UTC")
-        next_run = (now + pd.Timedelta(minutes=1)).floor("1min")
-        sleep_s  = (next_run - now).total_seconds()
-        print(f"[SIG] Chờ đến {next_run.strftime('%H:%M')} UTC ({sleep_s:.0f}s)...")
-        time.sleep(max(sleep_s, 1))
+        time.sleep(RUN_INTERVAL)
         cycle    += 1
         model_ctx = run_once(model_ctx, cycle)
 
