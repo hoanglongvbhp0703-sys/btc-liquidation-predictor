@@ -271,6 +271,7 @@ const SignalModule = (() => {
       _lastSignalTs = signal.opened_at;
       _showAlert(signal);
       _browserNotify(signal);
+      TradesModule.load(); // refresh ngay khi có signal mới, không chờ 30s
     }
   }
 
