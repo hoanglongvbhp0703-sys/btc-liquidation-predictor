@@ -96,7 +96,16 @@ const SignalModule = (() => {
         responsive: true, maintainAspectRatio: false,
         animation: { duration: 400 },
         plugins: {
-          legend: { display: false },
+          legend: { 
+            display: true,
+            position: 'top',
+            labels: {
+              color: '#c9d1d9',
+              font: { size: 11 },
+              padding: 8,
+              usePointStyle: true,
+            }
+          },
           tooltip: {
             enabled: true, mode: 'index', intersect: false,
             backgroundColor: '#161b22', borderColor: '#21262d', borderWidth: 1,

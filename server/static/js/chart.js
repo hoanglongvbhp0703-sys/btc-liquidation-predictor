@@ -2,10 +2,12 @@
 
 const ChartModule = (() => {
   let _chart, _candleSeries;
-  let _lastBar      = null;
+  let _lastBar       = null;
   let _currentMinute = null;
-  let _liqData      = [];   // raw liq events cho click lookup
-  let _tooltip      = null; // tooltip DOM element
+  let _liqData       = [];   // raw liq events cho click lookup
+  let _markers       = [];   // stored để re-apply khi bị clear
+  let _tooltip       = null; // tooltip DOM element
+  let _tfSeconds     = 60;   // timeframe của chart (60 / 300 / 900s)
 
   function init() {
     const el = document.getElementById('chart');
@@ -145,11 +147,13 @@ const ChartModule = (() => {
     _lastBar       = { ...bars[bars.length - 1] };
     _currentMinute = bars[bars.length - 1].time;
 
-    // Cập nhật label timeframe
-    const tfLabel = document.getElementById('tf-label');
-    if (tfLabel && klines[0] && klines[0].tf) {
-      const tfMap = { '1min': '1M', '5min': '5M', '15min': '15M' };
-      tfLabel.textContent = tfMap[klines[0].tf] || klines[0].tf;
+    // Cập nhật label timeframe và lưu _tfSeconds để bucket liq markers đúng
+    const tfSecMap = { '1min': 60, '5min': 300, '15min': 900 };
+    const tfLabel  = document.getElementById('tf-label');
+    if (klines[0] && klines[0].tf) {
+      const tfLabelMap = { '1min': '1M', '5min': '5M', '15min': '15M' };
+      if (tfLabel) tfLabel.textContent = tfLabelMap[klines[0].tf] || klines[0].tf;
+      _tfSeconds = tfSecMap[klines[0].tf] || 60;
     }
 
     _chart.timeScale().fitContent();
@@ -158,11 +162,12 @@ const ChartModule = (() => {
   function updateTick(tick) {
     if (!tick || !tick.price || !tick.ts) return;
 
-    const tSec  = Math.floor(new Date(tick.ts).getTime() / 1000);
-    const tMin  = Math.floor(tSec / 60) * 60;
-    const price = tick.price;
+    const tSec      = Math.floor(new Date(tick.ts).getTime() / 1000);
+    const tMin      = Math.floor(tSec / 60) * 60;
+    const price     = tick.price;
+    const isNewMin  = _currentMinute !== tMin;
 
-    if (_currentMinute !== tMin) {
+    if (isNewMin) {
       _currentMinute = tMin;
       _lastBar = { time: tMin, open: price, high: price, low: price, close: price };
     } else if (_lastBar) {
@@ -174,6 +179,12 @@ const ChartModule = (() => {
     }
 
     _candleSeries.update(_lastBar);
+
+    // Re-apply markers mỗi khi có phút mới — LightweightCharts đôi khi clear
+    // markers sau update() nên cần set lại để tránh markers biến mất
+    if (isNewMin && _markers.length > 0) {
+      _candleSeries.setMarkers(_markers);
+    }
   }
 
   function addLiqMarkers(liqs) {
@@ -181,18 +192,18 @@ const ChartModule = (() => {
 
     _liqData = liqs;
 
-    // Gộp theo phút (trùng timestamp trong cùng 1 phút → lấy USD lớn nhất)
+    // Gộp theo TF của chart (1min/5min/15min) → marker time khớp bar time
     const buckets = {};
     for (const l of liqs) {
-      const tMin = Math.floor(new Date(l.ts).getTime() / 60000) * 60;
-      const key  = `${tMin}_${l.side}`;
+      const tBucket = Math.floor(new Date(l.ts).getTime() / 1000 / _tfSeconds) * _tfSeconds;
+      const key     = `${tBucket}_${l.side}`;
       if (!buckets[key] || l.usd_value > buckets[key].usd) {
-        buckets[key] = { time: tMin, side: l.side, usd: l.usd_value, ts: l.ts };
+        buckets[key] = { time: tBucket, side: l.side, usd: l.usd_value, ts: l.ts };
       }
     }
 
     const markers = Object.values(buckets).map(b => {
-      const isLong = b.side === 'SELL'; // SELL = long bị quét → đỏ, từ trên xuống
+      const isLong = b.side === 'SELL'; // SELL = long bị quét → đỏ ở trên; BUY = short bị quét → xanh ở dưới
       return {
         time:     b.time,
         position: isLong ? 'aboveBar' : 'belowBar',
@@ -203,6 +214,7 @@ const ChartModule = (() => {
       };
     });
     markers.sort((a, b) => a.time - b.time);
+    _markers = markers;   // lưu lại để re-apply khi cần
     _candleSeries.setMarkers(markers);
   }
 

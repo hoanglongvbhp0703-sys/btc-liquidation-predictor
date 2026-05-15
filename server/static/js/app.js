@@ -80,4 +80,15 @@
 
   setInterval(() => TradesModule.load(), 30000);
 
+  // Refresh liq markers mỗi 5 phút — thêm liquidation mới + tránh mất markers
+  setInterval(async () => {
+    try {
+      const r    = await fetch('/api/liq/?hours=9999');
+      const liqs = await r.json();
+      ChartModule.addLiqMarkers(liqs);
+    } catch (e) {
+      console.error('liq refresh error:', e);
+    }
+  }, 5 * 60 * 1000);
+
 })();
