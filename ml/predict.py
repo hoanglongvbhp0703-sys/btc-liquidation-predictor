@@ -26,8 +26,8 @@ SAVED_DIR = BASE_DIR / "artifacts"
 META_FILE = SAVED_DIR / "meta.json"
 
 HORIZONS         = [1, 2, 3]
-CASCADE_TP_PCT   = 0.0012   # p75 of actual cascade amplitude (~0.12%)
-CASCADE_SL_PCT   = 0.0012   # 1:1 R:R → EV > 0 at precision ≥ 50%
+CASCADE_TP_PCT   = 0.004    # ~p98 of cascade amplitude, realistic trade target
+CASCADE_SL_PCT   = 0.004    # 1:1 R:R
 
 
 def _load_artifact(suffix: str) -> dict | None:
