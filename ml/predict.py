@@ -135,13 +135,15 @@ def _build_input(ctx: dict, feature_row: dict) -> np.ndarray:
 
 
 def predict_cascade_prob(ctx: dict, feature_row: dict, direction: str) -> float | None:
-    """P(cascade trong 3m) — avg prob của ensemble."""
+    """Max prob across all horizons (1m/2m/3m)."""
     curves = ctx.get(f"{direction}_curves", {})
-    sub    = curves.get(3)
-    if sub is None:
-        return None
-    X = _build_input(ctx, feature_row)
-    return round(_predict_proba_from_artifact(sub, X), 4)
+    X      = _build_input(ctx, feature_row)
+    probs  = [
+        _predict_proba_from_artifact(sub, X)
+        for h, sub in curves.items()
+        if sub is not None
+    ]
+    return round(max(probs), 4) if probs else None
 
 
 def predict_cascade_curve(ctx: dict, feature_row: dict, direction: str) -> dict:
