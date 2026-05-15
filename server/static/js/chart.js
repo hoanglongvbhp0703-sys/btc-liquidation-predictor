@@ -163,26 +163,24 @@ const ChartModule = (() => {
     if (!tick || !tick.price || !tick.ts) return;
 
     const tSec      = Math.floor(new Date(tick.ts).getTime() / 1000);
-    const tMin      = Math.floor(tSec / 60) * 60;
+    const tBucket   = Math.floor(tSec / _tfSeconds) * _tfSeconds;
     const price     = tick.price;
-    const isNewMin  = _currentMinute !== tMin;
+    const isNewBar  = _currentMinute !== tBucket;
 
-    if (isNewMin) {
-      _currentMinute = tMin;
-      _lastBar = { time: tMin, open: price, high: price, low: price, close: price };
+    if (isNewBar) {
+      _currentMinute = tBucket;
+      _lastBar = { time: tBucket, open: price, high: price, low: price, close: price };
     } else if (_lastBar) {
       _lastBar.close = price;
       _lastBar.high  = Math.max(_lastBar.high, price);
       _lastBar.low   = Math.min(_lastBar.low,  price);
     } else {
-      _lastBar = { time: tMin, open: price, high: price, low: price, close: price };
+      _lastBar = { time: tBucket, open: price, high: price, low: price, close: price };
     }
 
     _candleSeries.update(_lastBar);
 
-    // Re-apply markers mỗi khi có phút mới — LightweightCharts đôi khi clear
-    // markers sau update() nên cần set lại để tránh markers biến mất
-    if (isNewMin && _markers.length > 0) {
+    if (isNewBar && _markers.length > 0) {
       _candleSeries.setMarkers(_markers);
     }
   }
