@@ -20,7 +20,7 @@ from db import (
 OI_ENDPOINT    = "https://fapi.binance.com/fapi/v1/openInterest"
 PRICE_ENDPOINT = "https://fapi.binance.com/fapi/v1/ticker/price"
 SYMBOL         = "BTCUSDT"
-POLL_INTERVAL  = 30   # giây
+POLL_INTERVAL  = 15   # giây (trước 30s, tăng gấp đôi granularity)
 RETRY_DELAY    = 10   # giây khi gặp lỗi
 
 

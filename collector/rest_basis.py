@@ -19,7 +19,7 @@ from db import append_csv, now_utc, init_csv_files
 
 ENDPOINT     = "https://fapi.binance.com/fapi/v1/premiumIndex"
 SYMBOL       = "BTCUSDT"
-POLL_INTERVAL = 30   # giây
+POLL_INTERVAL = 15   # giây (trước 30s, tăng gấp đôi granularity)
 RETRY_DELAY   = 10
 
 

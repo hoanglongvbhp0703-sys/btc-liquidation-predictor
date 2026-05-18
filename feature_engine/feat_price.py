@@ -22,8 +22,9 @@ def compute_price_features(df_klines: pd.DataFrame) -> dict:
     price_change_30s = (current_price - open_price_30s) / open_price_30s if open_price_30s else 0.0
     volatility_1m    = float(np.std(close)) if len(close) > 1 else 0.0
 
-    total_volume    = float(df["volume"].sum())
-    taker_buy_vol   = float(df["taker_buy_vol"].sum())
+    # volume/taker_buy_vol là cumulative kể từ đầu nến → dùng snapshot cuối, không sum
+    total_volume    = float(df["volume"].iloc[-1])
+    taker_buy_vol   = float(df["taker_buy_vol"].iloc[-1])
     taker_buy_ratio = taker_buy_vol / total_volume if total_volume > 0 else 0.5
 
     return {

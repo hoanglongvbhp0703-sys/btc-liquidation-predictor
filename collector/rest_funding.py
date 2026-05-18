@@ -21,8 +21,8 @@ from db import (
 # ─── Config ──────────────────────────────────────────────────
 FUNDING_ENDPOINT = "https://fapi.binance.com/fapi/v1/premiumIndex"
 SYMBOL           = "BTCUSDT"
-POLL_INTERVAL    = 3600  # 1 giờ
-RETRY_DELAY      = 60    # 1 phút khi gặp lỗi
+POLL_INTERVAL    = 300   # 5 phút (8h settlement cycle, 1h quá thưa)
+RETRY_DELAY      = 30    # giây khi gặp lỗi
 
 
 async def fetch_funding(session: aiohttp.ClientSession) -> dict | None:
@@ -87,7 +87,7 @@ async def run_funding_poller():
     Poll Funding Rate mỗi POLL_INTERVAL giây.
     Fetch ngay lập tức khi start, sau đó chờ mỗi tiếng.
     """
-    print(f"[FUNDING] Bắt đầu poll mỗi {POLL_INTERVAL // 3600}h: {FUNDING_ENDPOINT}")
+    print(f"[FUNDING] Bắt đầu poll mỗi {POLL_INTERVAL // 60}m: {FUNDING_ENDPOINT}")
     pool = None
 
     try:

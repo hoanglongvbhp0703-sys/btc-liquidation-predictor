@@ -24,9 +24,16 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import FEATURES_FILE, LIQ_FILE
 
-HORIZONS          = [1, 2, 3]
-LOOKBACK_MINUTES  = 30        # baseline từ 30 phút lịch sử
-MIN_LIQ_THRESHOLD = 10_000    # $10k/min min threshold (scale down cho 1m window)
+HORIZONS         = [1, 2, 3]
+LOOKBACK_MINUTES = 30   # baseline từ 30 phút lịch sử
+
+# Lookback mở rộng khi cửa sổ 30m không có liq (expanding windows)
+_LOOKBACK_CHAIN = [
+    30,    # phút — thử 30m trước
+    120,   # thử 2h
+    360,   # thử 6h
+    1440,  # thử 24h
+]
 
 
 def _cascade_col(direction: str, minutes: int) -> str:
@@ -38,6 +45,31 @@ ALL_LABEL_COLS = (
     [_cascade_col("short", h) for h in HORIZONS] +
     ["time_to_cascade_long", "time_to_cascade_short"]
 )
+
+
+def _compute_liq_baseline(df_liq: pd.DataFrame, t_start: pd.Timestamp) -> tuple[float, float]:
+    """
+    Tính per-minute baseline liq dùng expanding lookback.
+    Thử 30m → 2h → 6h → 24h. Không dùng hardcoded floor.
+    Trả về (avg_short_pm, avg_long_pm).
+    """
+    for lb_min in _LOOKBACK_CHAIN:
+        t_lb   = t_start - timedelta(minutes=lb_min)
+        hist   = df_liq[(df_liq["event_time"] >= t_lb) & (df_liq["event_time"] < t_start)]
+        if hist.empty:
+            continue
+        n_min  = max((t_start - hist["event_time"].min()).total_seconds() / 60, 1.0)
+        short  = hist["liq_short"].sum() / n_min
+        long_  = hist["liq_long"].sum()  / n_min
+        if short > 0 or long_ > 0:
+            return short, long_
+
+    # Toàn bộ dataset không có liq nào trước T — cực kỳ hiếm
+    # Dùng global median thay vì hardcode
+    n_min  = max((t_start - df_liq["event_time"].min()).total_seconds() / 60, 1.0) if not df_liq.empty else 1.0
+    short  = df_liq["liq_short"].sum() / n_min if not df_liq.empty else 0.0
+    long_  = df_liq["liq_long"].sum()  / n_min if not df_liq.empty else 0.0
+    return max(short, 1.0), max(long_, 1.0)
 
 
 def _is_pending(val) -> bool:
@@ -85,7 +117,6 @@ def build_pending_labels() -> int:
     df_liq      = _load_liq()
     now_utc     = pd.Timestamp.now(tz="UTC")
     max_horizon = timedelta(minutes=max(HORIZONS))
-    lookback    = timedelta(minutes=LOOKBACK_MINUTES)
 
     labeled_count = 0
     skipped       = 0
@@ -101,16 +132,8 @@ def build_pending_labels() -> int:
             skipped += 1
             continue
 
-        # Threshold từ lookback [T-2h, T)
-        t_lb = t_start - lookback
-        liq_hist = df_liq[(df_liq["event_time"] >= t_lb) & (df_liq["event_time"] < t_start)]
-
-        hist_start  = liq_hist["event_time"].min() if not liq_hist.empty else t_lb
-        n_minutes   = max((t_start - hist_start).total_seconds() / 60, 1.0)
-
-        # Per-minute baseline rate
-        avg_short_pm = max(liq_hist["liq_short"].sum() / n_minutes, MIN_LIQ_THRESHOLD)
-        avg_long_pm  = max(liq_hist["liq_long"].sum()  / n_minutes, MIN_LIQ_THRESHOLD)
+        # Per-minute baseline từ expanding lookback (30m → 2h → 6h → 24h → global)
+        avg_short_pm, avg_long_pm = _compute_liq_baseline(df_liq, t_start)
 
         # Forward liq [T, T+max_horizon)
         liq_fwd = df_liq[
