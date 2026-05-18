@@ -22,10 +22,29 @@ PATIENCE  = 3      # dừng nếu không cải thiện 3 lần liên tiếp
 MIN_DELTA = 0.001  # cải thiện tối thiểu để tính là "tốt hơn"
 
 
+def _read_features_safe(retries: int = 3, delay: float = 2.0) -> pd.DataFrame | None:
+    """Đọc features_1m.csv với retry để tránh EmptyDataError do race condition."""
+    for attempt in range(retries):
+        try:
+            df = pd.read_csv(FEATURES_FILE)
+            if df.empty:
+                return None
+            return df
+        except Exception as e:
+            if attempt < retries - 1:
+                print(f"[AUTO-TRAIN] Đọc features lỗi ({e}), retry {attempt+1}/{retries}...", flush=True)
+                time.sleep(delay)
+            else:
+                print(f"[AUTO-TRAIN] Không đọc được features sau {retries} lần: {e}", flush=True)
+    return None
+
+
 def count_labeled_rows() -> int:
     if not FEATURES_FILE.exists():
         return 0
-    df  = pd.read_csv(FEATURES_FILE)
+    df = _read_features_safe()
+    if df is None:
+        return 0
     col = "cascade_long_3m" if "cascade_long_3m" in df.columns else "label"
     if col not in df.columns:
         return 0
@@ -37,7 +56,10 @@ def print_data_summary():
     if not FEATURES_FILE.exists():
         print("[AUTO-TRAIN] features_1m.csv chưa tồn tại.", flush=True)
         return
-    df = pd.read_csv(FEATURES_FILE)
+    df = _read_features_safe()
+    if df is None:
+        print("[AUTO-TRAIN] Không đọc được features_1m.csv.", flush=True)
+        return
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
 
@@ -124,28 +146,31 @@ def main():
     print(f"[AUTO-TRAIN] Khởi động — check mỗi {INTERVAL//60} phút.", flush=True)
 
     while True:
-        print_data_summary()
-        n = count_labeled_rows()
-        print(f"[AUTO-TRAIN] Labeled rows: {n}/{MIN_ROWS_TRAIN}", flush=True)
+        try:
+            print_data_summary()
+            n = count_labeled_rows()
+            print(f"[AUTO-TRAIN] Labeled rows: {n}/{MIN_ROWS_TRAIN}", flush=True)
 
-        if n >= MIN_ROWS_TRAIN:
-            ok = run_train()
-            if ok:
-                auc = read_avg_auc()
-                run_record = {
-                    "time": datetime.now(timezone.utc).isoformat(),
-                    "labeled_rows": n,
-                    "auc": auc,
-                }
-                history["runs"].append(run_record)
-                print(f"[AUTO-TRAIN] AUC trung bình: {auc}", flush=True)
+            if n >= MIN_ROWS_TRAIN:
+                ok = run_train()
+                if ok:
+                    auc = read_avg_auc()
+                    run_record = {
+                        "time": datetime.now(timezone.utc).isoformat(),
+                        "labeled_rows": n,
+                        "auc": auc,
+                    }
+                    history["runs"].append(run_record)
+                    print(f"[AUTO-TRAIN] AUC trung bình: {auc}", flush=True)
 
-                if check_stable(history):
-                    print(f"[AUTO-TRAIN] AUC ổn định — tiếp tục train để cải thiện với data mới.", flush=True)
+                    if check_stable(history):
+                        print(f"[AUTO-TRAIN] AUC ổn định — tiếp tục train để cải thiện với data mới.", flush=True)
 
-                save_history(history)
-        else:
-            print(f"[AUTO-TRAIN] Chưa đủ data, cần thêm {MIN_ROWS_TRAIN - n} rows.", flush=True)
+                    save_history(history)
+            else:
+                print(f"[AUTO-TRAIN] Chưa đủ data, cần thêm {MIN_ROWS_TRAIN - n} rows.", flush=True)
+        except Exception as e:
+            print(f"[AUTO-TRAIN] Lỗi không xử lý được: {e} — retry sau {INTERVAL//60} phút.", flush=True)
 
         print(f"[AUTO-TRAIN] Chờ {INTERVAL//60} phút...", flush=True)
         time.sleep(INTERVAL)

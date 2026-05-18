@@ -9,6 +9,7 @@ Mỗi 1 phút:
   5. In stats mỗi 1 giờ
 """
 
+import json
 import sys
 import time
 import traceback
@@ -21,19 +22,39 @@ sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(ROOT_DIR / "ml"))
 
 from predict   import load_model, predict_cascade_signal
-from paper_log import log_signal, check_outcomes, print_stats
+from paper_log import log_signal, check_outcomes, print_stats, has_open_trade
 from notifier  import notify_signal
 
 from config import FEATURES_FILE, ML_DIR, SIGNAL_THRESHOLD, MIN_ROWS_TRAIN
 
-MODEL_FILE    = ML_DIR / "ens_cascade_long_3m.pkl"
-RUN_INTERVAL  = 10
-STATS_EVERY   = 60
-MAX_TTC       = 2.0    # chỉ trade khi cascade dự đoán <= 2 phút
-SIGNAL_COOLDOWN = 180  # giây — tránh log trùng cùng 1 signal nhiều lần
+MODEL_FILE      = ML_DIR / "ens_cascade_long_3m.pkl"
+COOLDOWN_FILE   = ROOT_DIR / "data" / "signal_cooldown.json"
+RUN_INTERVAL    = 10
+STATS_EVERY     = 60
+MAX_TTC         = 2.0   # chỉ trade khi cascade dự đoán <= 2 phút
+SIGNAL_COOLDOWN = 900   # giây per-direction — 15 phút giữa 2 signal cùng chiều
 
 _last_model_mtime: float = 0.0
-_last_signal_ts:   float = 0.0  # epoch seconds của signal gần nhất
+_last_signal_ts: dict = {"long": 0.0, "short": 0.0}  # cooldown per direction — persisted to disk
+
+
+def _load_cooldown():
+    """Đọc cooldown timestamps từ disk để giữ qua restart."""
+    global _last_signal_ts
+    try:
+        if COOLDOWN_FILE.exists():
+            data = json.loads(COOLDOWN_FILE.read_text())
+            _last_signal_ts["long"]  = float(data.get("long",  0.0))
+            _last_signal_ts["short"] = float(data.get("short", 0.0))
+    except Exception:
+        pass
+
+
+def _save_cooldown():
+    try:
+        COOLDOWN_FILE.write_text(json.dumps(_last_signal_ts))
+    except Exception:
+        pass
 
 
 def load_latest_feature_row() -> dict | None:
@@ -112,16 +133,21 @@ def run_once(model_ctx: dict | None, cycle: int) -> dict | None:
         return model_ctx
 
     if signal:
-        global _last_signal_ts
+        direction = signal["direction"]
         now_epoch = pd.Timestamp.now(tz="UTC").timestamp()
-        if now_epoch - _last_signal_ts >= SIGNAL_COOLDOWN:
+        elapsed   = now_epoch - _last_signal_ts[direction]
+
+        if has_open_trade(direction):
+            print(f"[SIG] {direction.upper()} signal bỏ qua — đang có trade mở cùng chiều")
+        elif elapsed < SIGNAL_COOLDOWN:
+            remain = int(SIGNAL_COOLDOWN - elapsed)
+            print(f"[SIG] {direction.upper()} signal bỏ qua — cooldown còn {remain}s")
+        else:
             opened_at = pd.Timestamp.now(tz="UTC")
             log_signal(signal, opened_at)
             notify_signal(signal, opened_at)
-            _last_signal_ts = now_epoch
-        else:
-            remain = int(SIGNAL_COOLDOWN - (now_epoch - _last_signal_ts))
-            print(f"[SIG] Signal detected nhưng còn cooldown {remain}s — bỏ qua")
+            _last_signal_ts[direction] = now_epoch
+            _save_cooldown()
     else:
         print(f"[SIG] Không có signal (threshold={SIGNAL_THRESHOLD}, max_ttc={MAX_TTC}m)")
 
@@ -150,6 +176,9 @@ def main():
 ║   Chạy mỗi 10 giây                         ║
 ╚══════════════════════════════════════════════╝
     """)
+
+    _load_cooldown()
+    print(f"[SIG] Cooldown restored — long={_last_signal_ts['long']:.0f}, short={_last_signal_ts['short']:.0f}")
 
     model_ctx = None
     cycle     = 0

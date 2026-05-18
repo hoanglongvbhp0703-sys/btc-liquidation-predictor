@@ -170,6 +170,18 @@ def check_outcomes() -> int:
     return updated
 
 
+def has_open_trade(direction: str) -> bool:
+    """Trả về True nếu đang có paper trade chưa resolved theo direction."""
+    _init_file()
+    try:
+        df = pd.read_csv(PAPER_TRADES_FILE, dtype=str, keep_default_na=False)
+        pending = df[df["outcome"] == ""]
+        sig_name = "CASCADE_LONG" if direction == "long" else "CASCADE_SHORT"
+        return any(pending["signal"] == sig_name)
+    except Exception:
+        return False
+
+
 def print_stats() -> None:
     """In thống kê paper trading ra stdout."""
     _init_file()
