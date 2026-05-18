@@ -26,8 +26,8 @@ SAVED_DIR = BASE_DIR / "artifacts"
 META_FILE = SAVED_DIR / "meta.json"
 
 HORIZONS         = [1, 2, 3]
-CASCADE_TP_PCT   = 0.0015   # 0.15% — calibrated to cascade p75 (0.12%), gives EV+ at 60% precision
-CASCADE_SL_PCT   = 0.0015   # 1:1 R:R
+CASCADE_TP_PCT   = 0.0012   # 0.12% — above taker fee round-trip (0.10%), ~p90 cascade move
+CASCADE_SL_PCT   = 0.0012   # 1:1 R:R
 
 
 def _load_artifact(suffix: str) -> dict | None:

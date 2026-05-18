@@ -32,7 +32,7 @@ META_FILE          = ML_DIR / "meta.json"
 TRAIN_HISTORY_FILE = ML_DIR / "train_history.json"
 
 # ── Trading constants (override via .env) ────────────────────────
-SIGNAL_THRESHOLD = float(os.getenv("SIGNAL_THRESHOLD", "0.60"))
+SIGNAL_THRESHOLD = float(os.getenv("SIGNAL_THRESHOLD", "0.65"))
 MIN_RR           = float(os.getenv("MIN_RR",           "1.5"))
 MIN_ROWS_TRAIN   = int(os.getenv("MIN_ROWS_TRAIN",     "200"))
 HORIZONS         = [1, 2, 3]

@@ -62,6 +62,7 @@ const TradesModule = (() => {
     }).join('');
 
     _updateMiniStats(trades);
+    _updateTpSlHeaders(trades);
   }
 
   function _updateMiniStats(trades) {
@@ -78,6 +79,22 @@ const TradesModule = (() => {
     const pnlEl = document.getElementById('total-pnl');
     pnlEl.textContent = pnls.length > 0 ? (total >= 0 ? '+' : '') + total.toFixed(2) + '%' : '--';
     pnlEl.style.color = total >= 0 ? 'var(--green)' : 'var(--red)';
+  }
+
+  function _updateTpSlHeaders(trades) {
+    const t = trades.find(x => x.entry && x.tp && x.sl);
+    if (!t) return;
+    const entry = Number(t.entry);
+    const tp    = Number(t.tp);
+    const sl    = Number(t.sl);
+    if (!entry || !tp || !sl) return;
+    const isLong  = (t.signal || '').includes('LONG') || !(t.signal || '').includes('SHORT');
+    const tpPct   = Math.abs((tp - entry) / entry * 100).toFixed(2);
+    const slPct   = Math.abs((sl - entry) / entry * 100).toFixed(2);
+    const thTp = document.getElementById('th-tp');
+    const thSl = document.getElementById('th-sl');
+    if (thTp) thTp.textContent = `TP (+${tpPct}%)`;
+    if (thSl) thSl.textContent = `SL (-${slPct}%)`;
   }
 
   async function load() {
