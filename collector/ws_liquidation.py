@@ -9,8 +9,13 @@ Giải thích side:
 
 import json
 import asyncio
+import sys
 import websockets
 from decimal import Decimal
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import SYMBOL
 
 from db import (
     get_pool, insert_liquidation, append_csv,
@@ -120,6 +125,10 @@ async def run_liquidation_stream():
 
                     row = parse_liquidation(msg)
                     if row is None:
+                        continue
+
+                    # Chỉ lưu liquidation của symbol đang theo dõi
+                    if row["symbol"] != SYMBOL:
                         continue
 
                     await save_liquidation(pool, row)

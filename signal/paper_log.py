@@ -17,9 +17,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import PAPER_TRADES_FILE, KLINES_FILE
 
 OUTCOME_WINDOW = timedelta(minutes=3)
+FILL_WINDOW    = timedelta(seconds=30)  # maker order: fill check window
 
 PAPER_COLS = [
     "opened_at", "signal", "prob", "entry", "tp", "sl", "rr", "est_minutes",
+    "order_type",
     "closed_at", "outcome", "pnl_pct", "hit_tp", "hit_sl",
 ]
 
@@ -42,6 +44,7 @@ def log_signal(signal: dict, opened_at: pd.Timestamp) -> None:
         "sl":          signal["sl"],
         "rr":          signal["rr"],
         "est_minutes": signal.get("est_minutes", ""),
+        "order_type":  signal.get("order_type", "market"),
         "closed_at":   "",
         "outcome":     "",
         "pnl_pct":     "",
@@ -87,9 +90,11 @@ def check_outcomes() -> int:
         if now < t_end:
             continue  # chưa đủ 30 phút
 
-        entry = float(trade["entry"])
-        tp    = float(trade["tp"])
-        sl    = float(trade["sl"])
+        entry      = float(trade["entry"])
+        tp         = float(trade["tp"])
+        sl         = float(trade["sl"])
+        order_type = trade.get("order_type", "market")
+        is_long    = trade.get("signal", "CASCADE_LONG") != "CASCADE_SHORT"
 
         # Load klines chỉ trong cửa sổ [opened_at, t_end]
         try:
@@ -111,11 +116,37 @@ def check_outcomes() -> int:
         if window.empty:
             continue
 
+        # Maker order: kiểm tra fill trong 30s đầu
+        if order_type == "maker":
+            fill_end     = opened_at + FILL_WINDOW
+            fill_window  = window[window["open_time"] <= fill_end]
+            filled       = False
+            fill_time    = None
+            for _, r in fill_window.iterrows():
+                if is_long and r["low"] <= entry:
+                    filled, fill_time = True, r["open_time"]
+                    break
+                if not is_long and r["high"] >= entry:
+                    filled, fill_time = True, r["open_time"]
+                    break
+
+            if not filled:
+                df.at[idx, "closed_at"] = (opened_at + FILL_WINDOW).isoformat()
+                df.at[idx, "outcome"]   = "UNFILLED"
+                df.at[idx, "pnl_pct"]   = 0.0
+                df.at[idx, "hit_tp"]    = 0
+                df.at[idx, "hit_sl"]    = 0
+                print(f"[SIG] ⭕ UNFILLED | entry={entry} não chạm trong 30s")
+                updated += 1
+                continue
+
+            # Filled — chỉ check TP/SL từ lúc fill trở đi
+            window = window[window["open_time"] >= fill_time]
+
         # Duyệt từng nến 1s để xác định hit TP hay SL trước
         hit_tp = hit_sl = False
         close_price = entry
 
-        is_long = trade.get("signal", "CASCADE_LONG") != "CASCADE_SHORT"
         for _, row in window.iterrows():
             if is_long:
                 if row["high"] >= tp:
@@ -136,7 +167,6 @@ def check_outcomes() -> int:
             # Không hit → dùng giá cuối cùng trong cửa sổ
             close_price = float(window.iloc[-1]["low"])
 
-        is_long = trade.get("signal", "CASCADE_LONG") != "CASCADE_SHORT"
         if hit_tp:
             outcome   = "WIN"
             pnl_pct   = round(abs(tp - entry) / entry * 100, 3)

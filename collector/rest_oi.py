@@ -8,8 +8,13 @@ Open Interest (OI) = tổng số lượng hợp đồng đang mở
 """
 
 import asyncio
+import sys
 import aiohttp
 from decimal import Decimal
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import SYMBOL
 
 from db import (
     get_pool, insert_oi, append_csv,
@@ -19,7 +24,6 @@ from db import (
 # ─── Config ──────────────────────────────────────────────────
 OI_ENDPOINT    = "https://fapi.binance.com/fapi/v1/openInterest"
 PRICE_ENDPOINT = "https://fapi.binance.com/fapi/v1/ticker/price"
-SYMBOL         = "BTCUSDT"
 POLL_INTERVAL  = 15   # giây (trước 30s, tăng gấp đôi granularity)
 RETRY_DELAY    = 10   # giây khi gặp lỗi
 

@@ -37,10 +37,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from ml.train import FEATURE_COLS, prepare_features
-from config import FEATURES_FILE, SIGNAL_THRESHOLD
+from config import FEATURES_FILE, SIGNAL_THRESHOLD, ML_DIR, HORIZONS
 
-ARTIFACTS_DIR = ROOT / "ml" / "artifacts"
-HORIZONS      = [1, 2, 3]
+ARTIFACTS_DIR = ML_DIR
 THRESHOLD     = SIGNAL_THRESHOLD
 REFRESH_SEC   = 60
 

@@ -4,12 +4,14 @@ Load tất cả CSVs 1 lần → loop qua timestamps → slice in-memory → wri
 Bỏ qua timestamps đã có trong features file.
 """
 import sys, csv, time
-sys.path.insert(0, "/home/coder/feature_engine")
-sys.path.insert(0, "/home/coder")
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "feature_engine"))
+sys.path.insert(0, str(ROOT))
 
 import pandas as pd
 import numpy as np
-from pathlib import Path
 from datetime import timedelta
 
 from build_features import FEATURE_COLUMNS
@@ -19,18 +21,16 @@ from feat_orderbook     import compute_orderbook_features
 from feat_aggtrade      import compute_aggtrade_features
 from feat_oi            import compute_oi_features
 from feat_funding       import compute_funding_features
-from config import DATA_DIR
+from config import DATA_DIR, FEATURES_FILE
 
 # ── Optional spot/basis (graceful if missing) ──────────────────────
 try:
     from feat_spot_aggtrade import compute_spot_aggtrade_features
     from feat_basis         import compute_basis_features
-    from config import SPOT_AGGTRADE_FILE, BASIS_FILE
+    from config import SPOT_AGGTRADE_FILE, PREMIUM_INDEX_FILE, BASIS_FILE
     HAS_SPOT = True
 except Exception:
     HAS_SPOT = False
-
-FEATURES_FILE = Path("/home/coder/data/features_1m.csv")
 
 # ── Load all raw data once ─────────────────────────────────────────
 print("Loading raw data...")
@@ -61,21 +61,30 @@ oi["timestamp"] = pd.to_datetime(oi["timestamp"], format="ISO8601", utc=True, er
 oi = oi.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 print(f"  open_interest: {len(oi)} rows")
 
-funding = pd.read_csv(DATA_DIR / "funding_rate.csv")
-funding["timestamp"] = pd.to_datetime(funding["timestamp"], format="ISO8601", utc=True, errors="coerce")
-funding = funding.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-print(f"  funding_rate: {len(funding)} rows")
+# Đọc premium_index.csv nếu có (mới), fallback về funding_rate.csv (cũ)
+if HAS_SPOT and PREMIUM_INDEX_FILE.exists() and PREMIUM_INDEX_FILE.stat().st_size > 100:
+    funding = pd.read_csv(PREMIUM_INDEX_FILE)
+    funding["timestamp"] = pd.to_datetime(funding["timestamp"], format="ISO8601", utc=True, errors="coerce")
+    funding = funding.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    print(f"  premium_index: {len(funding)} rows")
+    basis = funding  # premium_index chứa cả basis_pct
+else:
+    funding = pd.read_csv(DATA_DIR / "funding_rate.csv")
+    funding["timestamp"] = pd.to_datetime(funding["timestamp"], format="ISO8601", utc=True, errors="coerce")
+    funding = funding.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    print(f"  funding_rate: {len(funding)} rows")
+    basis = pd.DataFrame()
+    if HAS_SPOT and BASIS_FILE.exists():
+        basis = pd.read_csv(BASIS_FILE)
+        basis["timestamp"] = pd.to_datetime(basis["timestamp"], format="ISO8601", utc=True, errors="coerce")
+        basis = basis.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        print(f"  basis: {len(basis)} rows")
 
 if HAS_SPOT:
     spot_agg = pd.read_csv(SPOT_AGGTRADE_FILE)
     spot_agg["timestamp"] = pd.to_datetime(spot_agg["timestamp"], format="ISO8601", utc=True, errors="coerce")
     spot_agg = spot_agg.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
     print(f"  spot_aggtrades: {len(spot_agg)} rows")
-
-    basis = pd.read_csv(BASIS_FILE)
-    basis["timestamp"] = pd.to_datetime(basis["timestamp"], format="ISO8601", utc=True, errors="coerce")
-    basis = basis.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-    print(f"  basis: {len(basis)} rows")
 
 print(f"Load time: {time.time()-t0:.1f}s")
 
@@ -137,9 +146,10 @@ with open(FEATURES_FILE, "a", newline="", encoding="utf-8") as f:
 
             if HAS_SPOT:
                 w_spot  = slice_1m(spot_agg, "timestamp", ts)
-                w_basis = slice_1m(basis,    "timestamp", ts)
                 row.update(compute_spot_aggtrade_features(w_spot))
-                row.update(compute_basis_features(w_basis))
+                if not basis.empty:
+                    w_basis = slice_4h(basis, "timestamp", ts)
+                    row.update(compute_basis_features(w_basis))
                 fut_cvd  = row.get("cvd_delta_1m")
                 spot_cvd = row.get("spot_cvd_delta_1m")
                 row["cvd_divergence"] = round(float(fut_cvd) - float(spot_cvd), 4) if (fut_cvd is not None and spot_cvd is not None) else None

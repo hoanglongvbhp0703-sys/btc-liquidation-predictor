@@ -25,14 +25,16 @@ from predict   import load_model, predict_cascade_signal
 from paper_log import log_signal, check_outcomes, print_stats, has_open_trade
 from notifier  import notify_signal
 
-from config import FEATURES_FILE, ML_DIR, SIGNAL_THRESHOLD, MIN_ROWS_TRAIN
+from config import (
+    FEATURES_FILE, ML_DIR, DATA_DIR,
+    SIGNAL_THRESHOLD, MIN_ROWS_TRAIN, LIQ_FILTER_USD,
+    SIGNAL_COOLDOWN, MAX_TTC,
+)
 
-MODEL_FILE      = ML_DIR / "ens_cascade_long_3m.pkl"
-COOLDOWN_FILE   = ROOT_DIR / "data" / "signal_cooldown.json"
-RUN_INTERVAL    = 10
-STATS_EVERY     = 60
-MAX_TTC         = 2.0   # chỉ trade khi cascade dự đoán <= 2 phút
-SIGNAL_COOLDOWN = 900   # giây per-direction — 15 phút giữa 2 signal cùng chiều
+MODEL_FILE    = ML_DIR / "ens_cascade_long_3m.pkl"
+COOLDOWN_FILE = DATA_DIR / "signal_cooldown.json"
+RUN_INTERVAL  = 10
+STATS_EVERY   = 60
 
 _last_model_mtime: float = 0.0
 _last_signal_ts: dict = {"long": 0.0, "short": 0.0}  # cooldown per direction — persisted to disk
@@ -123,6 +125,12 @@ def run_once(model_ctx: dict | None, cycle: int) -> dict | None:
     current_price = _to_float(feature_row.get("current_price"))
     if current_price is None:
         print("[SIG] current_price không hợp lệ.")
+        return model_ctx
+
+    # Liq filter: bỏ qua nếu tổng thanh lý 1m < ngưỡng (cascade nhỏ không đáng trade)
+    liq_total = _to_float(feature_row.get("liq_total_1m"))
+    if liq_total is not None and liq_total < LIQ_FILTER_USD:
+        print(f"[SIG] Liq filter: liq_total_1m={liq_total:,.0f} < {LIQ_FILTER_USD:,.0f} → skip")
         return model_ctx
 
     try:

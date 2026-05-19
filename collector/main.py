@@ -28,8 +28,7 @@ from ws_orderbook import run_orderbook_stream
 from ws_aggtrade import run_aggtrade_stream
 from ws_spot_aggtrade import run_spot_aggtrade_stream
 from rest_oi import run_oi_poller
-from rest_funding import run_funding_poller
-from rest_basis import run_basis_poller
+from rest_premium_index import run_premium_index_poller
 
 
 def handle_shutdown(loop, tasks):
@@ -43,14 +42,13 @@ async def health_monitor():
     """In trạng thái hệ thống mỗi 5 phút."""
     data_dir = Path(__file__).parent.parent / "data"
     files = {
-        "klines_1s.csv":      "Nến 1s",
-        "liquidations.csv":   "Liquidation",
-        "open_interest.csv":  "Open Interest",
-        "funding_rate.csv":   "Funding Rate",
-        "orderbook.csv":      "Order Book",
-        "aggtrades.csv":      "Futures CVD",
-        "spot_aggtrades.csv": "Spot CVD",
-        "basis.csv":          "Basis",
+        "klines_1s.csv":       "Nến 1s",
+        "liquidations.csv":    "Liquidation",
+        "open_interest.csv":   "Open Interest",
+        "premium_index.csv":   "Premium Index",
+        "orderbook.csv":       "Order Book",
+        "aggtrades.csv":       "Futures CVD",
+        "spot_aggtrades.csv":  "Spot CVD",
     }
 
     while True:
@@ -73,11 +71,11 @@ async def health_monitor():
 async def main():
     print("""
 ╔══════════════════════════════════════════════════╗
-║   BTC Futures Collector — Tầng 1                 ║
-║   Binance USDS-M  |  8 streams                   ║
+║   Futures Collector — Tầng 1                     ║
+║   Binance USDS-M  |  7 streams                   ║
 ║                                                  ║
-║   kline · liquidation · OI · funding             ║
-║   orderbook · futures CVD · spot CVD · basis                       ║
+║   kline · liquidation · OI · premium_index       ║
+║   orderbook · futures CVD · spot CVD             ║
 ╚══════════════════════════════════════════════════╝
     """)
 
@@ -91,7 +89,7 @@ async def main():
         print(f"[MAIN] ⚠️  Không kết nối được DB: {e}")
         print("[MAIN] Tiếp tục chỉ với CSV...")
 
-    print("[MAIN] Khởi động 8 collector...\n")
+    print("[MAIN] Khởi động 7 collector...\n")
 
     tasks = [
         asyncio.create_task(run_kline_stream(),           name="kline"),
@@ -99,9 +97,8 @@ async def main():
         asyncio.create_task(run_orderbook_stream(),       name="orderbook"),
         asyncio.create_task(run_aggtrade_stream(),        name="aggtrade"),
         asyncio.create_task(run_spot_aggtrade_stream(),   name="spot_aggtrade"),
-        asyncio.create_task(run_oi_poller(),              name="oi"),
-        asyncio.create_task(run_funding_poller(),         name="funding"),
-        asyncio.create_task(run_basis_poller(),           name="basis"),
+        asyncio.create_task(run_oi_poller(),               name="oi"),
+        asyncio.create_task(run_premium_index_poller(),   name="premium_index"),
         asyncio.create_task(health_monitor(),             name="health"),
     ]
 

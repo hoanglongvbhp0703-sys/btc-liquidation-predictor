@@ -5,8 +5,8 @@ from datetime import timedelta
 
 from load_data import (
     load_klines, load_liquidations, load_orderbook,
-    load_aggtrades, load_open_interest, load_funding_rate,
-    load_spot_aggtrades, load_basis,
+    load_aggtrades, load_open_interest, load_premium_index,
+    load_spot_aggtrades,
 )
 from feat_price          import compute_price_features
 from feat_liquidation    import compute_liquidation_features
@@ -29,8 +29,7 @@ def build_feature_row(at_time: pd.Timestamp) -> dict:
     df_agg         = load_aggtrades(since=ago_1m)
     df_spot        = load_spot_aggtrades(since=ago_1m)
     df_oi          = load_open_interest(since=ago_4h)
-    df_funding     = load_funding_rate(since=ago_4h)
-    df_basis       = load_basis(since=ago_1m)
+    df_premium     = load_premium_index(since=ago_4h)   # funding + basis từ 1 CSV
 
     price_feats      = compute_price_features(df_klines)
     liq_feats        = compute_liquidation_features(df_liq_1m)
@@ -38,8 +37,8 @@ def build_feature_row(at_time: pd.Timestamp) -> dict:
     agg_feats        = compute_aggtrade_features(df_agg)
     spot_feats       = compute_spot_aggtrade_features(df_spot)
     oi_feats         = compute_oi_features(df_oi)
-    funding_feats    = compute_funding_features(df_funding)
-    basis_feats      = compute_basis_features(df_basis)
+    funding_feats    = compute_funding_features(df_premium)
+    basis_feats      = compute_basis_features(df_premium)
 
     row = {"timestamp": now.isoformat()}
     row.update(price_feats)

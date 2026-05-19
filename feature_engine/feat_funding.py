@@ -1,7 +1,7 @@
 """
-feat_funding.py — Features từ funding_rate.csv
+feat_funding.py — Features từ premium_index.csv (funding columns)
 
-Input : DataFrame từ load_funding_rate()
+Input : DataFrame từ load_premium_index() — cột: timestamp, funding_rate, next_funding_time
 Output: dict các features funding rate
 
 Cấu trúc CSV thực tế (1 dòng):
@@ -98,7 +98,7 @@ def compute_funding_features(df_funding: pd.DataFrame) -> dict:
             # next_funding_time đã được parse thành UTC Timestamp bởi load_data.py
             # Không truyền tz= vì sẽ lỗi "Cannot pass tzinfo with the tz parameter"
             next_ts = pd.Timestamp(next_funding_raw)
-            now_ts  = t_now  # đã là UTC từ load_funding_rate()
+            now_ts  = t_now  # đã là UTC từ load_premium_index()
 
             delta_secs = (next_ts - now_ts).total_seconds()
             if delta_secs < 0:

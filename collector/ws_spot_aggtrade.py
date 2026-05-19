@@ -13,13 +13,18 @@ Ghi: batch mỗi 1s (không ghi lệnh đơn lẻ — spot volume quá lớn)
 
 import json
 import asyncio
+import sys
 from decimal import Decimal
+from pathlib import Path
 
 import websockets
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import SPOT_SYMBOL
+
 from db import append_csv, now_utc, init_csv_files
 
-STREAM_URL      = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
+STREAM_URL      = f"wss://stream.binance.com:9443/ws/{SPOT_SYMBOL.lower()}@aggTrade"
 RECONNECT_DELAY = 5
 MAX_RECONNECT   = 999
 WRITE_INTERVAL  = 1.0

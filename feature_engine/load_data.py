@@ -38,7 +38,7 @@ import pandas as pd
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import DATA_DIR, SPOT_AGGTRADE_FILE, BASIS_FILE
+from config import DATA_DIR, SPOT_AGGTRADE_FILE, BASIS_FILE, PREMIUM_INDEX_FILE, FUNDING_FILE
 
 
 def _parse_dt(df: pd.DataFrame, col: str) -> pd.DataFrame:
@@ -145,6 +145,61 @@ def load_open_interest(since=None) -> pd.DataFrame:
         dtype={"oi_btc": float, "oi_usd": float},
     )
     df = _parse_dt(df, "timestamp")
+    if since is not None:
+        df = df[df["timestamp"] >= since]
+    return df.sort_values("timestamp").reset_index(drop=True)
+
+
+def load_premium_index(since=None) -> pd.DataFrame:
+    """
+    Columns: timestamp, funding_rate, next_funding_time, mark_price, index_price, basis_pct
+    Fallback: nếu premium_index.csv chưa đủ data, đọc funding_rate.csv + basis.csv cũ.
+    """
+    cols = ["timestamp", "funding_rate", "next_funding_time",
+            "mark_price", "index_price", "basis_pct"]
+    if PREMIUM_INDEX_FILE.exists() and PREMIUM_INDEX_FILE.stat().st_size > 100:
+        df = pd.read_csv(
+            PREMIUM_INDEX_FILE,
+            names=cols, header=0,
+            dtype={"funding_rate": float, "mark_price": float,
+                   "index_price": float, "basis_pct": float},
+        )
+        df = _parse_dt(df, "timestamp")
+        df = _parse_dt(df, "next_funding_time")
+        if since is not None:
+            df = df[df["timestamp"] >= since]
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        if not df.empty:
+            return df
+
+    # Fallback: ghép funding_rate.csv + basis.csv cũ (có 10 ngày data)
+    frames = []
+    if FUNDING_FILE.exists():
+        df_f = pd.read_csv(
+            FUNDING_FILE,
+            names=["timestamp", "funding_rate", "next_funding_time"],
+            header=0, dtype={"funding_rate": float},
+        )
+        df_f = _parse_dt(df_f, "timestamp")
+        df_f = _parse_dt(df_f, "next_funding_time")
+        frames.append(df_f[["timestamp", "funding_rate", "next_funding_time"]])
+    if BASIS_FILE.exists():
+        df_b = pd.read_csv(
+            BASIS_FILE,
+            names=["timestamp", "mark_price", "index_price", "basis_pct"],
+            header=0, dtype={"mark_price": float, "index_price": float, "basis_pct": float},
+        )
+        df_b = _parse_dt(df_b, "timestamp")
+        frames.append(df_b[["timestamp", "mark_price", "index_price", "basis_pct"]])
+
+    if not frames:
+        return pd.DataFrame(columns=cols)
+
+    df = frames[0] if len(frames) == 1 else pd.merge_asof(
+        frames[0].sort_values("timestamp"),
+        frames[1].sort_values("timestamp"),
+        on="timestamp", direction="nearest",
+    )
     if since is not None:
         df = df[df["timestamp"] >= since]
     return df.sort_values("timestamp").reset_index(drop=True)

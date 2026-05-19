@@ -32,14 +32,17 @@ def _send_telegram(text: str) -> bool:
 
 
 def notify_signal(signal: dict, opened_at) -> None:
-    """Gửi thông báo khi có signal LONG mới."""
+    """Gửi thông báo khi có signal mới."""
+    direction = signal.get("direction", "long").upper()
+    sig_name  = signal.get("signal", f"CASCADE_{direction}")
+    icon      = "🔴" if direction == "SHORT" else "🟢"
     msg = (
-        f"🟢 <b>BTC LONG SIGNAL</b>\n"
+        f"{icon} <b>{sig_name}</b>\n"
         f"🕒 {opened_at.strftime('%Y-%m-%d %H:%M')} UTC\n"
         f"\n"
         f"  Entry : <b>${signal['entry']:,.0f}</b>\n"
-        f"  TP    : <b>${signal['tp']:,.0f}</b>  (+{(signal['tp']/signal['entry']-1)*100:.2f}%)\n"
-        f"  SL    : <b>${signal['sl']:,.0f}</b>  ({(signal['sl']/signal['entry']-1)*100:.2f}%)\n"
+        f"  TP    : <b>${signal['tp']:,.0f}</b>  ({(signal['tp']/signal['entry']-1)*100:+.2f}%)\n"
+        f"  SL    : <b>${signal['sl']:,.0f}</b>  ({(signal['sl']/signal['entry']-1)*100:+.2f}%)\n"
         f"  R:R   : <b>{signal['rr']:.2f}</b>\n"
         f"  Prob  : <b>{signal['prob']*100:.1f}%</b>\n"
     )

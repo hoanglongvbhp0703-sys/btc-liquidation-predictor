@@ -29,8 +29,13 @@ Tại sao không ghi tất cả real-time?
 
 import json
 import asyncio
+import sys
 import websockets
 from decimal import Decimal
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import SYMBOL
 
 from db import (
     append_csv, ts_from_ms,
@@ -39,7 +44,7 @@ from db import (
 )
 
 # ─── Cấu hình ──────────────────────────────────────────────────
-STREAM_URL      = "wss://fstream.binance.com/market/ws/btcusdt@aggTrade"
+STREAM_URL      = f"wss://fstream.binance.com/market/ws/{SYMBOL.lower()}@aggTrade"
 RECONNECT_DELAY = 5
 MAX_RECONNECT   = 999
 WRITE_INTERVAL  = 1.0      # giây — ghi batch mỗi 1s

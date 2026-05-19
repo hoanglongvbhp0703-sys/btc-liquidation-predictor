@@ -13,7 +13,12 @@ Tick payload:
 import sys
 import time
 import threading
+import warnings
 from pathlib import Path
+
+# sklearn RandomForest phát warning này mỗi lần predict_proba — không có ích lợi
+warnings.filterwarnings("ignore", message=".*sklearn.utils.parallel.delayed.*")
+warnings.filterwarnings("ignore", message=".*does not have valid feature names.*")
 
 ROOT_DIR  = Path(__file__).parent.parent.parent
 MODEL_DIR = ROOT_DIR / "ml"
@@ -33,6 +38,8 @@ _lock        = threading.Lock()
 # Cache predictions per feature-row timestamp — re-run model only when features update (~1 min)
 _pred_cache: dict = {}
 _pred_cache_ts: str | None = None
+_sig_cache: dict | None = None
+_sig_cache_ts: str | None = None
 
 
 def _current_model_mtime() -> float | None:
@@ -103,13 +110,23 @@ def _get_predictions(feat: dict) -> tuple:
 
 
 def _predict_signal(feature_row: dict, price: float) -> dict | None:
+    global _sig_cache, _sig_cache_ts
     if _model_ctx is None or price is None:
         return None
+
+    feat_ts = feature_row.get("timestamp") if feature_row else None
+    if feat_ts is not None and feat_ts == _sig_cache_ts:
+        return _sig_cache
+
     try:
         import predict as _predict
-        return _predict.predict_cascade_signal(_model_ctx, feature_row, price)
+        result = _predict.predict_cascade_signal(_model_ctx, feature_row, price)
     except Exception:
-        return None
+        result = None
+
+    _sig_cache_ts = feat_ts
+    _sig_cache    = result
+    return result
 
 
 def _sig_dict(signal: dict | None) -> dict | None:

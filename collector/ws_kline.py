@@ -1,7 +1,12 @@
 import json
 import asyncio
+import sys
 import websockets
 from decimal import Decimal
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import SYMBOL
 
 from db import (
     append_csv, ts_from_ms, now_utc,
@@ -12,7 +17,7 @@ from db import (
 # ─── Cấu hình ──────────────────────────────────────────────────
 # Binance Futures không có interval 1s → dùng 1m, update mỗi 250ms
 # Mỗi giây chỉ ghi 1 dòng (snapshot tại giây đó)
-STREAM_URL      = "wss://fstream.binance.com/market/ws/btcusdt@kline_1m"
+STREAM_URL      = f"wss://fstream.binance.com/market/ws/{SYMBOL.lower()}@kline_1m"
 RECONNECT_DELAY = 5
 MAX_RECONNECT   = 999
 WRITE_INTERVAL  = 1.0  # giây

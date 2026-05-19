@@ -1,5 +1,5 @@
 """
-feat_basis.py — Futures-spot basis features từ basis.csv
+feat_basis.py — Futures-spot basis features từ premium_index.csv (basis columns)
 
 basis_pct > 0: futures premium → longs nhiều, shorts at risk → short squeeze tiềm năng
 basis_pct < 0: futures discount → shorts nhiều, longs at risk → long liquidation tiềm năng

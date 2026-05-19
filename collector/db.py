@@ -7,21 +7,21 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import (
-    DATA_DIR, KLINES_FILE, LIQ_FILE, OI_FILE, FUNDING_FILE,
-    ORDERBOOK_FILE, AGGTRADE_FILE, SPOT_AGGTRADE_FILE, BASIS_FILE,
+    DATA_DIR, KLINES_FILE, LIQ_FILE, OI_FILE,
+    ORDERBOOK_FILE, AGGTRADE_FILE, SPOT_AGGTRADE_FILE,
+    PREMIUM_INDEX_FILE,
 )
 
 DATA_DIR.mkdir(exist_ok=True)
 
 FILES = {
-    "klines":         KLINES_FILE,
-    "liquidation":    LIQ_FILE,
-    "oi":             OI_FILE,
-    "funding":        FUNDING_FILE,
-    "orderbook":      ORDERBOOK_FILE,
-    "aggtrade":       AGGTRADE_FILE,
-    "spot_aggtrade":  SPOT_AGGTRADE_FILE,
-    "basis":          BASIS_FILE,
+    "klines":          KLINES_FILE,
+    "liquidation":     LIQ_FILE,
+    "oi":              OI_FILE,
+    "premium_index":   PREMIUM_INDEX_FILE,
+    "orderbook":       ORDERBOOK_FILE,
+    "aggtrade":        AGGTRADE_FILE,
+    "spot_aggtrade":   SPOT_AGGTRADE_FILE,
 }
 
 # ─── Định nghĩa Header ───────────────────────────────────────
@@ -37,8 +37,9 @@ CSV_HEADERS = {
     "oi": [
         "timestamp", "oi_btc", "oi_usd"
     ],
-    "funding": [
-        "timestamp", "funding_rate", "next_funding_time"
+    "premium_index": [
+        "timestamp", "funding_rate", "next_funding_time",
+        "mark_price", "index_price", "basis_pct",
     ],
     # Snapshot order book mỗi 1s:
     # bid/ask top 5 levels → đủ để tính imbalance, spread, wall
@@ -72,10 +73,6 @@ CSV_HEADERS = {
     "spot_aggtrade": [
         "timestamp", "agg_id", "price", "qty",
         "usd_value", "is_buyer_maker", "cvd_delta",
-    ],
-    # Futures-spot basis từ premiumIndex (mỗi 30s)
-    "basis": [
-        "timestamp", "mark_price", "index_price", "basis_pct",
     ],
 }
 

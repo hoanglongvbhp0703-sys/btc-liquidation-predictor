@@ -19,8 +19,13 @@ Các fix khác:
 
 import json
 import asyncio
+import sys
 import websockets
 from decimal import Decimal
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import SYMBOL
 
 from db import (
     append_csv, now_utc,
@@ -30,7 +35,7 @@ from db import (
 
 # ─── Cấu hình ──────────────────────────────────────────────────
 # /stream?streams= là endpoint đúng cho depth stream
-STREAM_URL      = "wss://fstream.binance.com/stream?streams=btcusdt@depth20@500ms"
+STREAM_URL      = f"wss://fstream.binance.com/stream?streams={SYMBOL.lower()}@depth20@500ms"
 RECONNECT_DELAY = 5
 MAX_RECONNECT   = 999
 WRITE_INTERVAL  = 1.0

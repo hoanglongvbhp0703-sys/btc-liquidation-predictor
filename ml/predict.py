@@ -13,6 +13,7 @@ API:
 
 import json
 import pickle
+import sys
 import warnings
 from pathlib import Path
 
@@ -20,14 +21,17 @@ import numpy as np
 import pandas as pd
 
 warnings.filterwarnings("ignore", message="X does not have valid feature names")
+warnings.filterwarnings("ignore", message=".*sklearn.utils.parallel.delayed.*")
 
-BASE_DIR  = Path(__file__).parent
-SAVED_DIR = BASE_DIR / "artifacts"
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import (
+    USE_MAKER, MAKER_OFFSET_PCT,
+    CASCADE_TP_PCT, CASCADE_SL_PCT,
+    HORIZONS, ML_DIR,
+)
+
+SAVED_DIR = ML_DIR
 META_FILE = SAVED_DIR / "meta.json"
-
-HORIZONS         = [1, 2, 3]
-CASCADE_TP_PCT   = 0.0012   # 0.12% — above taker fee round-trip (0.10%), ~p90 cascade move
-CASCADE_SL_PCT   = 0.0012   # 1:1 R:R
 
 
 def _load_artifact(suffix: str) -> dict | None:
@@ -197,26 +201,30 @@ def predict_cascade_signal(
             continue
 
         if direction == "long":
-            tp  = round(current_price * (1 + CASCADE_TP_PCT), 2)
-            sl  = round(current_price * (1 - CASCADE_SL_PCT), 2)
-            sig = "CASCADE_LONG"
+            entry = round(current_price * (1 - MAKER_OFFSET_PCT), 2) if USE_MAKER else round(current_price, 2)
+            tp    = round(entry * (1 + CASCADE_TP_PCT), 2)
+            sl    = round(entry * (1 - CASCADE_SL_PCT), 2)
+            sig   = "CASCADE_LONG"
         else:
-            tp  = round(current_price * (1 - CASCADE_TP_PCT), 2)
-            sl  = round(current_price * (1 + CASCADE_SL_PCT), 2)
-            sig = "CASCADE_SHORT"
+            entry = round(current_price * (1 + MAKER_OFFSET_PCT), 2) if USE_MAKER else round(current_price, 2)
+            tp    = round(entry * (1 - CASCADE_TP_PCT), 2)
+            sl    = round(entry * (1 + CASCADE_SL_PCT), 2)
+            sig   = "CASCADE_SHORT"
 
-        rr = CASCADE_TP_PCT / CASCADE_SL_PCT
+        rr         = CASCADE_TP_PCT / CASCADE_SL_PCT
+        order_type = "maker" if USE_MAKER else "market"
 
         return {
             "signal":      sig,
             "direction":   direction,
             "prob":        round(prob, 4),
-            "entry":       round(current_price, 2),
+            "entry":       entry,
             "tp":          tp,
             "sl":          sl,
             "rr":          round(rr, 2),
             "est_minutes": ttc,
             "threshold":   threshold,
+            "order_type":  order_type,
         }
 
     return None
