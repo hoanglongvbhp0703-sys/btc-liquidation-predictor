@@ -1,13 +1,12 @@
 """
 train.py — Tầng 4: Train cascade liquidation models
 
-Model = RandomForest (n_estimators=300, class_weight=balanced)
-  Notebook benchmark: RF avg AUC 0.7039 > Ensemble(RF+LR+XGB) 0.6625.
-  Platt scaling thử nghiệm → max_prob ~0.13 (Platt reveal true prob << 0.70).
-  Raw RF prob dùng threshold 0.70 heuristic vẫn cho precision cao hơn khi signal fires.
+Model = Ensemble (RF + LogisticReg + XGBoost) — avg prob của 3 models
+  Benchmark 12k rows: Ensemble avg AUC 0.7157 > RF 0.7128 > XGB 0.7041 > LR 0.6919
+  SHORT avg AUC 0.735, LONG avg AUC 0.697
 
 Artifacts per target: ens_cascade_{direction}_{h}m.pkl
-  chứa {"models": [rf], "imputer": ..., "model_names": ["RandomForest"]}
+  chứa {"models": [rf, lr, xgb], "imputer": ..., "scaler": ..., "model_names": [...]}
 
 Output artifacts: ml/artifacts/
 """
@@ -19,8 +18,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import roc_auc_score, precision_score, recall_score
+import xgboost as xgb
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -73,7 +75,7 @@ def time_split(df: pd.DataFrame):
     return df.iloc[:n_train], df.iloc[n_train:]
 
 
-# ── Model: RandomForest ───────────────────────────────────────────
+# ── Model: Ensemble (RF + LogisticReg + XGBoost) ─────────────────
 
 def _train_classifier(df_all: pd.DataFrame, label_col: str, direction: str, horizon: int) -> dict | None:
     if label_col not in df_all.columns:
@@ -110,28 +112,56 @@ def _train_classifier(df_all: pd.DataFrame, label_col: str, direction: str, hori
     X_inner_imp = imputer.fit_transform(X_inner)
     X_test_imp  = imputer.transform(X_test)
 
+    scaler = StandardScaler()
+    X_inner_sc = scaler.fit_transform(X_inner_imp)
+    X_test_sc  = scaler.transform(X_test_imp)
+
+    spw = float((y_inner == 0).sum()) / max((y_inner == 1).sum(), 1)
+
     rf = RandomForestClassifier(
         n_estimators=300, max_depth=10, class_weight="balanced",
         random_state=42, n_jobs=-1,
     )
     rf.fit(X_inner_imp, y_inner)
 
-    prob_test = rf.predict_proba(X_test_imp)[:, 1]
+    lr = LogisticRegression(max_iter=500, class_weight="balanced", random_state=42)
+    lr.fit(X_inner_sc, y_inner)
+
+    xgb_model = xgb.XGBClassifier(
+        n_estimators=300, max_depth=6, learning_rate=0.05,
+        subsample=0.8, colsample_bytree=0.8,
+        scale_pos_weight=spw,
+        eval_metric="logloss", random_state=42, n_jobs=-1,
+        device="cpu", verbosity=0,
+    )
+    xgb_model.fit(X_inner_imp, y_inner)
+
+    # Ensemble: avg prob RF + LR + XGB
+    p_rf  = rf.predict_proba(X_test_imp)[:, 1]
+    p_lr  = lr.predict_proba(X_test_sc)[:, 1]
+    p_xgb = xgb_model.predict_proba(X_test_imp)[:, 1]
+    prob_test = (p_rf + p_lr + p_xgb) / 3
+
     auc_test  = roc_auc_score(y_test, prob_test) if len(np.unique(y_test)) > 1 else float("nan")
+    auc_rf    = roc_auc_score(y_test, p_rf)  if len(np.unique(y_test)) > 1 else float("nan")
+    auc_lr    = roc_auc_score(y_test, p_lr)  if len(np.unique(y_test)) > 1 else float("nan")
+    auc_xgb   = roc_auc_score(y_test, p_xgb) if len(np.unique(y_test)) > 1 else float("nan")
 
     pred_test = (prob_test >= SIGNAL_THRESHOLD).astype(int)
     n_signals = int(pred_test.sum())
     prec = precision_score(y_test, pred_test, zero_division=0) if n_signals > 0 else 0.0
     rec  = recall_score(y_test, pred_test, zero_division=0)    if n_signals > 0 else 0.0
 
-    print(f"[TRAIN]   AUC={auc_test:.4f}  max_prob={prob_test.max():.3f}  @{SIGNAL_THRESHOLD}: signals={n_signals} prec={prec:.3f} rec={rec:.3f}")
+    print(f"[TRAIN]   AUC ens={auc_test:.4f}  rf={auc_rf:.4f}  lr={auc_lr:.4f}  xgb={auc_xgb:.4f}")
+    print(f"[TRAIN]   max_prob={prob_test.max():.3f}  @{SIGNAL_THRESHOLD}: signals={n_signals} prec={prec:.3f} rec={rec:.3f}")
 
     suffix   = f"cascade_{direction}_{horizon}m"
     ens_file = SAVED_DIR / f"ens_{suffix}.pkl"
     artifact = {
-        "models":      [rf],
+        "models":      [rf, lr, xgb_model],
         "imputer":     imputer,
-        "model_names": ["RandomForest"],
+        "scaler":      scaler,
+        "model_names": ["RandomForest", "LogisticReg", "XGBoost"],
     }
     with open(ens_file, "wb") as f:
         pickle.dump(artifact, f)
@@ -142,6 +172,9 @@ def _train_classifier(df_all: pd.DataFrame, label_col: str, direction: str, hori
         "n_train":        int(len(X_inner)),
         "n_test":         int(len(X_test)),
         "auc_test":       round(float(auc_test), 4) if not np.isnan(auc_test) else None,
+        "auc_rf":         round(float(auc_rf),   4) if not np.isnan(auc_rf)   else None,
+        "auc_lr":         round(float(auc_lr),   4) if not np.isnan(auc_lr)   else None,
+        "auc_xgb":        round(float(auc_xgb),  4) if not np.isnan(auc_xgb)  else None,
         "max_prob":       round(float(prob_test.max()), 4),
         "precision":      round(float(prec), 4),
         "recall":         round(float(rec),  4),
@@ -186,7 +219,7 @@ def train():
     avg_auc = round(sum(aucs) / len(aucs), 4) if aucs else None
 
     meta = {
-        "model_type":       "RandomForest cascade",
+        "model_type":       "Ensemble_RF+LR+XGB cascade",
         "feature_cols":     FEATURE_COLS,
         "signal_threshold": SIGNAL_THRESHOLD,
         "trained_at":       pd.Timestamp.now(tz="UTC").isoformat(),
