@@ -40,8 +40,13 @@ const SignalModule = (() => {
     });
   }
 
+  let _lastCvdVal = null;
+
   function _updateCvdChart(cvd) {
     if (cvd === null || cvd === undefined) return;
+    // Chỉ thêm điểm mới khi cvd_delta_1m thực sự thay đổi (feature update ~1 phút/lần)
+    if (cvd === _lastCvdVal) return;
+    _lastCvdVal = cvd;
     if (_cvdBase === null) _cvdBase = 0;
     _cvdBase += cvd;
     _cvdHistory.push(_cvdBase);
@@ -244,11 +249,11 @@ const SignalModule = (() => {
           <span class="sig-val sig-entry">${_formatPrice(signal.entry)}</span>
         </div>
         <div class="sig-row">
-          <span class="sig-lbl">TP <span style="font-size:10px;color:var(--muted)">(+0.8%)</span></span>
+          <span class="sig-lbl">TP <span style="font-size:10px;color:var(--muted)">(+${signal.entry && signal.tp ? Math.abs((signal.tp - signal.entry) / signal.entry * 100).toFixed(2) : '?'}%)</span></span>
           <span class="sig-val sig-tp">${_formatPrice(signal.tp)}</span>
         </div>
         <div class="sig-row">
-          <span class="sig-lbl">SL <span style="font-size:10px;color:var(--muted)">(-0.5%)</span></span>
+          <span class="sig-lbl">SL <span style="font-size:10px;color:var(--muted)">(-${signal.entry && signal.sl ? Math.abs((signal.sl - signal.entry) / signal.entry * 100).toFixed(2) : '?'}%)</span></span>
           <span class="sig-val sig-sl">${_formatPrice(signal.sl)}</span>
         </div>
         <div class="sig-row">

@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT_DIR))
 from config import (
     KLINES_FILE, LIQ_FILE, FEATURES_FILE,
     PAPER_TRADES_FILE as TRADES_FILE,
+    SYMBOL,
 )
 
 KLINE_COLS = ["open_time", "open", "high", "low", "close",
@@ -151,7 +152,7 @@ def load_liquidations(hours: int = 0) -> list[dict]:
         )
         df["event_time"] = pd.to_datetime(df["event_time"], format="ISO8601", utc=True, errors="coerce")
         df = df.dropna(subset=["event_time"])
-        df = df[df["symbol"] == "BTCUSDT"]
+        df = df[df["symbol"] == SYMBOL]
         if hours > 0:
             since = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=hours)
             df = df[df["event_time"] >= since]

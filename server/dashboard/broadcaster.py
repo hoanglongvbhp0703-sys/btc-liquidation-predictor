@@ -21,11 +21,14 @@ warnings.filterwarnings("ignore", message=".*sklearn.utils.parallel.delayed.*")
 warnings.filterwarnings("ignore", message=".*does not have valid feature names.*")
 
 ROOT_DIR  = Path(__file__).parent.parent.parent
-MODEL_DIR = ROOT_DIR / "ml"
-MODEL_FILE = MODEL_DIR / "artifacts" / "ens_cascade_long_3m.pkl"
 
-if str(MODEL_DIR) not in sys.path:
-    sys.path.insert(0, str(MODEL_DIR))
+if str(ROOT_DIR / "ml") not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR / "ml"))
+
+sys.path.insert(0, str(ROOT_DIR))
+from config import ML_DIR
+
+MODEL_FILE = ML_DIR / "ens_cascade_long_3m.pkl"
 
 from .data_reader import read_latest_kline, read_latest_features, read_active_signal
 
