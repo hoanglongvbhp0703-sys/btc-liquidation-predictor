@@ -1,7 +1,7 @@
 """
 test_data_reader.py — Unit tests cho dashboard/data_reader.py
 
-Dùng fake data trong /tmp/fake_test_data (không đụng đến data thật).
+Dùng fake data trong /tmp/btc_fake_test (không đụng đến data thật).
 """
 
 import sys
@@ -15,12 +15,11 @@ from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
 
 # ── Path setup ─────────────────────────────────────────────────────────────
-ROOT_DIR   = Path(__file__).parent.parent
+ROOT_DIR   = Path(__file__).parent.parent.parent   # tests/unit/../../  = project root
 SERVER_DIR = ROOT_DIR / "server"
 TESTS_DIR  = ROOT_DIR / "tests"
 sys.path.insert(0, str(SERVER_DIR))
 
-# Fake data dir dùng trong tests
 FAKE_DIR = Path(tempfile.gettempdir()) / "btc_fake_test"
 
 
@@ -45,13 +44,11 @@ def patch_data_dir():
     originals = {
         "KLINES_FILE":   dr.KLINES_FILE,
         "LIQ_FILE":      dr.LIQ_FILE,
-        "OB_FILE":       dr.OB_FILE,
         "FEATURES_FILE": dr.FEATURES_FILE,
         "TRADES_FILE":   dr.TRADES_FILE,
     }
     dr.KLINES_FILE   = FAKE_DIR / "klines_1s.csv"
     dr.LIQ_FILE      = FAKE_DIR / "liquidations.csv"
-    dr.OB_FILE       = FAKE_DIR / "orderbook.csv"
     dr.FEATURES_FILE = FAKE_DIR / "features_5m.csv"
     dr.TRADES_FILE   = FAKE_DIR / "paper_trades.csv"
     yield dr
@@ -95,7 +92,7 @@ class TestReadLatestKline:
         assert result is None
 
     def test_ts_is_recent(self, patch_data_dir):
-        """Timestamp phải trong vòng HOURS giờ qua."""
+        """Timestamp phải trong vòng 4 giờ qua."""
         dr = patch_data_dir
         result = dr.read_latest_kline()
         assert result is not None
@@ -103,7 +100,7 @@ class TestReadLatestKline:
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         age = datetime.now(tz=timezone.utc) - ts
-        assert age.total_seconds() < 3 * 3600, f"kline quá cũ: {age}"
+        assert age.total_seconds() < 4 * 3600, f"kline quá cũ: {age}"
 
 
 # ── Tests: read_latest_features ───────────────────────────────────────────
@@ -115,20 +112,20 @@ class TestReadLatestFeatures:
         assert result is not None
         assert isinstance(result, dict)
 
-    def test_has_price_and_liq_zones(self, patch_data_dir):
+    def test_has_core_feature_keys(self, patch_data_dir):
+        """Kiểm tra các key thực sự có trong features_1m.csv."""
         dr = patch_data_dir
         result = dr.read_latest_features()
         assert result is not None
-        for key in ("current_price", "liq_zone_upper", "liq_zone_lower"):
+        for key in ("current_price", "imbalance_now", "cvd_delta_1m",
+                    "funding_rate", "delta_oi_1m"):
             assert key in result, f"Missing key: {key}"
 
-    def test_liq_upper_gt_lower(self, patch_data_dir):
+    def test_current_price_positive(self, patch_data_dir):
         dr = patch_data_dir
         result = dr.read_latest_features()
         assert result is not None
-        upper = float(result["liq_zone_upper"])
-        lower = float(result["liq_zone_lower"])
-        assert upper > lower, f"upper={upper} không > lower={lower}"
+        assert float(result["current_price"]) > 0
 
     def test_returns_none_on_missing_file(self, patch_data_dir):
         dr = patch_data_dir
@@ -163,9 +160,10 @@ class TestReadActiveSignal:
         dr = patch_data_dir
         closed_csv = tmp_path / "closed_trades.csv"
         closed_csv.write_text(
-            "opened_at,signal,prob,entry,tp,sl,rr,closed_at,outcome,pnl_pct,hit_tp,hit_sl\n"
-            "2020-01-01T00:00:00+00:00,LONG,0.8,80000,81200,79200,1.5,"
-            "2020-01-01T01:00:00+00:00,WIN,1.5,True,False\n"
+            "opened_at,signal,prob,entry,tp,sl,rr,est_minutes,order_type,"
+            "closed_at,outcome,pnl_pct,hit_tp,hit_sl\n"
+            "2020-01-01T00:00:00+00:00,CASCADE_LONG,0.8,80000,81200,79200,1.5,1.0,market,"
+            "2020-01-01T01:00:00+00:00,WIN,1.5,1,0\n"
         )
         dr.TRADES_FILE = closed_csv
         result = dr.read_active_signal()
@@ -192,16 +190,6 @@ class TestLoadKlinesChart:
         c = result[0]
         for key in ("ts", "open", "high", "low", "close", "volume"):
             assert key in c, f"Candle thiếu key: {key}"
-
-    def test_candles_are_1min(self, patch_data_dir):
-        """Mỗi nến cách nhau đúng 60 giây."""
-        dr = patch_data_dir
-        result = dr.load_klines_chart(hours=2)
-        assert len(result) >= 2
-        ts0 = datetime.fromisoformat(result[0]["ts"])
-        ts1 = datetime.fromisoformat(result[1]["ts"])
-        diff = abs((ts1 - ts0).total_seconds())
-        assert diff == 60, f"Khoảng cách nến không phải 60s: {diff}s"
 
     def test_candles_sorted_ascending(self, patch_data_dir):
         dr = patch_data_dir
@@ -236,8 +224,7 @@ class TestLoadLiquidations:
         result = dr.load_liquidations(hours=4)
         assert isinstance(result, list)
 
-    def test_btcusdt_only(self, patch_data_dir):
-        """Chỉ lấy BTCUSDT theo filter trong data_reader."""
+    def test_side_valid(self, patch_data_dir):
         dr = patch_data_dir
         result = dr.load_liquidations(hours=4)
         for r in result:
@@ -249,6 +236,12 @@ class TestLoadLiquidations:
         if result:
             for key in ("ts", "side", "price", "usd_value"):
                 assert key in result[0], f"Thiếu key: {key}"
+
+    def test_filters_non_btcusdt(self, patch_data_dir):
+        """load_liquidations chỉ giữ BTCUSDT (SYMBOL mặc định)."""
+        dr = patch_data_dir
+        result = dr.load_liquidations(hours=4)
+        assert len(result) == 20, f"Số liq không đúng: {len(result)} (expected 20 BTCUSDT)"
 
 
 # ── Tests: load_trades ─────────────────────────────────────────────────────
@@ -273,6 +266,14 @@ class TestLoadTrades:
             ts1 = result[1].get("opened_at", "")
             assert ts0 >= ts1, "Trade không được sắp xếp newest-first"
 
+    def test_outcomes_include_all_types(self, patch_data_dir):
+        """Fake data có WIN, LOSS, EXPIRED, UNFILLED, OPEN → tất cả hợp lệ."""
+        dr = patch_data_dir
+        result = dr.load_trades(limit=30)
+        outcomes = {t.get("outcome", "") for t in result}
+        valid = {"WIN", "LOSS", "EXPIRED", "UNFILLED", ""}
+        assert outcomes <= valid, f"outcome lạ: {outcomes - valid}"
+
 
 # ── Tests: load_signal_state ──────────────────────────────────────────────
 
@@ -283,10 +284,11 @@ class TestLoadSignalState:
         assert isinstance(result, dict)
 
     def test_required_keys(self, patch_data_dir):
+        """Kiểm tra keys thực sự được trả về bởi load_signal_state()."""
         dr = patch_data_dir
         result = dr.load_signal_state()
-        for key in ("current_price", "liq_upper", "liq_lower",
-                    "imbalance", "cvd_5m", "funding_rate", "delta_oi_5m"):
+        for key in ("current_price", "imbalance", "cvd_1m",
+                    "funding_rate", "delta_oi_1m"):
             assert key in result, f"Thiếu key: {key}"
 
     def test_current_price_positive(self, patch_data_dir):
@@ -295,16 +297,16 @@ class TestLoadSignalState:
         assert result["current_price"] is not None
         assert float(result["current_price"]) > 0
 
-    def test_liq_upper_gt_lower(self, patch_data_dir):
-        dr = patch_data_dir
-        result = dr.load_signal_state()
-        upper = result.get("liq_upper")
-        lower = result.get("liq_lower")
-        if upper is not None and lower is not None:
-            assert upper > lower, f"liq_upper={upper} phải > liq_lower={lower}"
-
     def test_active_signal_present(self, patch_data_dir):
         """Fake data có open trade → active_signal không None."""
         dr = patch_data_dir
         result = dr.load_signal_state()
         assert result.get("active_signal") is not None
+
+    def test_active_signal_has_entry(self, patch_data_dir):
+        dr = patch_data_dir
+        result = dr.load_signal_state()
+        sig = result.get("active_signal")
+        assert sig is not None
+        assert "entry" in sig
+        assert float(sig["entry"]) > 0

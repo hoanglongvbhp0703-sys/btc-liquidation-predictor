@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone
 
-ROOT_DIR   = Path(__file__).parent.parent
+ROOT_DIR   = Path(__file__).parent.parent.parent   # tests/integration/../../ = project root
 SERVER_DIR = ROOT_DIR / "server"
 TESTS_DIR  = ROOT_DIR / "tests"
 
@@ -53,13 +53,11 @@ def patch_data_files():
     originals = {
         "KLINES_FILE":   dr.KLINES_FILE,
         "LIQ_FILE":      dr.LIQ_FILE,
-        "OB_FILE":       dr.OB_FILE,
         "FEATURES_FILE": dr.FEATURES_FILE,
         "TRADES_FILE":   dr.TRADES_FILE,
     }
     dr.KLINES_FILE   = FAKE_DIR / "klines_1s.csv"
     dr.LIQ_FILE      = FAKE_DIR / "liquidations.csv"
-    dr.OB_FILE       = FAKE_DIR / "orderbook.csv"
     dr.FEATURES_FILE = FAKE_DIR / "features_5m.csv"
     dr.TRADES_FILE   = FAKE_DIR / "paper_trades.csv"
     yield
@@ -98,9 +96,9 @@ class TestApiKlines:
         d1, d2 = res1.json(), res2.json()
         assert len(d2) >= len(d1), "hours=2 phải có nhiều nến hơn hours=1"
 
-    def test_hours_clamped(self, client):
-        """hours ngoài range [1,24] phải được clamp."""
-        res = client.get("/api/klines/?hours=999")
+    def test_hours_invalid_returns_200(self, client):
+        """hours không hợp lệ phải trả 200 (không crash)."""
+        res = client.get("/api/klines/?hours=abc")
         assert res.status_code == 200
 
     def test_candles_sorted(self, client):
@@ -132,10 +130,11 @@ class TestApiSignal:
         assert isinstance(data, dict)
 
     def test_required_keys(self, client):
+        """Kiểm tra keys thực sự được trả về bởi load_signal_state()."""
         res = client.get("/api/signal/")
         data = res.json()
-        for key in ("current_price", "liq_upper", "liq_lower",
-                    "imbalance", "cvd_5m", "funding_rate"):
+        for key in ("current_price", "imbalance", "cvd_1m",
+                    "funding_rate", "delta_oi_1m"):
             assert key in data, f"Thiếu key: {key}"
 
     def test_no_nan_in_response(self, client):
@@ -150,14 +149,6 @@ class TestApiSignal:
         data = res.json()
         assert data["current_price"] is not None
         assert data["current_price"] > 0
-
-    def test_liq_zones_valid(self, client):
-        res = client.get("/api/signal/")
-        data = res.json()
-        upper = data.get("liq_upper")
-        lower = data.get("liq_lower")
-        if upper and lower:
-            assert upper > lower
 
     def test_active_signal_has_entry(self, client):
         """Fake data có open trade → active_signal phải có entry."""
@@ -198,12 +189,18 @@ class TestApiTrades:
         data = res.json()
         assert len(data) <= 2
 
+    def test_limit_invalid_returns_200(self, client):
+        """limit không hợp lệ phải trả 200 (không crash)."""
+        res = client.get("/api/trades/?limit=abc")
+        assert res.status_code == 200
+
     def test_outcomes_valid(self, client):
-        """outcome chỉ được là WIN, LOSS hoặc rỗng (open)."""
+        """outcome hợp lệ: WIN, LOSS, EXPIRED, UNFILLED, hoặc rỗng (open)."""
         res = client.get("/api/trades/")
         data = res.json()
+        valid = {"WIN", "LOSS", "EXPIRED", "UNFILLED", ""}
         for t in data:
-            assert t["outcome"] in ("WIN", "LOSS", ""), f"outcome lạ: {t['outcome']}"
+            assert t["outcome"] in valid, f"outcome lạ: {t['outcome']}"
 
 
 # ── GET /api/liq/ ──────────────────────────────────────────────────────────
@@ -228,19 +225,24 @@ class TestApiLiq:
     def test_side_is_buy_or_sell(self, client):
         res = client.get("/api/liq/")
         data = res.json()
-        for l in data:
-            assert l["side"] in ("BUY", "SELL")
+        for liq in data:
+            assert liq["side"] in ("BUY", "SELL")
 
     def test_hours_param(self, client):
         res = client.get("/api/liq/?hours=1")
         assert res.status_code == 200
 
+    def test_hours_invalid_returns_200(self, client):
+        """hours không hợp lệ phải trả 200 (không crash)."""
+        res = client.get("/api/liq/?hours=abc")
+        assert res.status_code == 200
+
     def test_prices_positive(self, client):
         res = client.get("/api/liq/")
         data = res.json()
-        for l in data:
-            assert l["price"] > 0
-            assert l["usd_value"] >= 0
+        for liq in data:
+            assert liq["price"] > 0
+            assert liq["usd_value"] >= 0
 
 
 # ── GET / (dashboard page) ─────────────────────────────────────────────────

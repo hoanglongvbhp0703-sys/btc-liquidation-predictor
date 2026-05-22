@@ -347,9 +347,34 @@ const SignalModule = (() => {
     _renderSignalPanel(signal);
   }
 
+  async function _seedCvdHistory() {
+    try {
+      const res  = await fetch('/api/cvd-history/');
+      const vals = await res.json();   // [delta1, delta2, ..., deltaN]
+      if (!Array.isArray(vals) || vals.length < 2) return;
+      _cvdBase = 0;
+      for (const d of vals) {
+        _cvdBase += d;
+        _cvdHistory.push(_cvdBase);
+      }
+      if (_cvdHistory.length > CVD_MAX) _cvdHistory.splice(0, _cvdHistory.length - CVD_MAX);
+      _lastCvdVal = vals[vals.length - 1];
+
+      const trend = _cvdHistory[_cvdHistory.length - 1] - _cvdHistory[0];
+      const col   = trend >= 0 ? 'rgba(63,185,80,0.85)' : 'rgba(248,81,73,0.85)';
+      const bg    = trend >= 0 ? 'rgba(63,185,80,0.08)'  : 'rgba(248,81,73,0.08)';
+      _cvdChart.data.datasets[0].borderColor     = col;
+      _cvdChart.data.datasets[0].backgroundColor = bg;
+      _cvdChart.data.labels                      = _cvdHistory.map((_, i) => i);
+      _cvdChart.data.datasets[0].data            = _cvdHistory;
+      _cvdChart.update('none');
+    } catch (_) {}
+  }
+
   function init() {
     _initCvdChart();
     _initCurveChart();
+    _seedCvdHistory();
     document.addEventListener('click', () => {
       if (Notification.permission === 'default') Notification.requestPermission();
     }, { once: true });

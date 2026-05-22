@@ -10,12 +10,11 @@ cd "$(dirname "$0")/.."
 
 VENV=".venv"
 PYTHON="$VENV/bin/python"
-PYTEST="$VENV/bin/pytest"
 
 # Cài pytest nếu thiếu
 if ! "$PYTHON" -m pytest --version &>/dev/null; then
     echo "[setup] Installing pytest..."
-    "$PYTHON" -m pip install pytest --quiet
+    "$PYTHON" -m pip install pytest pytest-django --quiet
 fi
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -27,11 +26,12 @@ echo "▶ Step 1: Generate fake data"
 "$PYTHON" tests/generate_fake_data.py
 echo ""
 
-echo "▶ Step 2: Run tests"
-"$PYTHON" -m pytest tests/test_data_reader.py tests/test_api.py \
-    --tb=short \
-    -q \
-    "$@"
+echo "▶ Step 2: Run unit tests"
+"$PYTHON" -m pytest tests/unit/ --tb=short -q "$@"
+echo ""
+
+echo "▶ Step 3: Run integration tests"
+"$PYTHON" -m pytest tests/integration/ --tb=short -q "$@"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

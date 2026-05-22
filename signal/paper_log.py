@@ -2,8 +2,8 @@
 paper_log.py — Ghi và theo dõi paper trades
 
 paper_trades.csv columns:
-  opened_at, signal, prob, entry, tp, sl, rr,
-  closed_at, outcome, pnl_pct, hit_tp, hit_sl
+  opened_at, signal, prob, entry, tp, sl, rr, est_minutes,
+  order_type, closed_at, outcome, pnl_pct, hit_tp, hit_sl
 """
 
 import csv
@@ -16,7 +16,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import PAPER_TRADES_FILE, KLINES_FILE
 
-OUTCOME_WINDOW = timedelta(minutes=3)
+OUTCOME_WINDOW = timedelta(minutes=3)   # cửa sổ đánh giá TP/SL sau khi vào lệnh
 FILL_WINDOW    = timedelta(seconds=30)  # maker order: fill check window
 
 PAPER_COLS = [
@@ -61,11 +61,11 @@ def log_signal(signal: dict, opened_at: pd.Timestamp) -> None:
 
 def check_outcomes() -> int:
     """
-    Điền outcome cho các trade đã đủ 30 phút.
+    Điền outcome cho các trade đã đủ 3 phút (OUTCOME_WINDOW).
     Duyệt klines_1s.csv theo thứ tự thời gian:
       high >= tp → WIN (hit TP)
       low  <= sl → LOSS (hit SL)
-      hết 30 phút không hit → EXPIRED
+      hết 3 phút không hit → EXPIRED
 
     Returns: số trade vừa được update.
     """
@@ -88,7 +88,7 @@ def check_outcomes() -> int:
 
         t_end = opened_at + OUTCOME_WINDOW
         if now < t_end:
-            continue  # chưa đủ 30 phút
+            continue  # chưa đủ OUTCOME_WINDOW (3 phút)
 
         entry      = float(trade["entry"])
         tp         = float(trade["tp"])

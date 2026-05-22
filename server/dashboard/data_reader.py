@@ -66,7 +66,7 @@ def read_latest_features() -> dict | None:
         df = pd.read_csv(FEATURES_FILE, dtype=str)
         if df.empty:
             return None
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce", format="ISO8601")
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
         return df.iloc[-1].to_dict()
     except Exception:
@@ -177,6 +177,19 @@ def load_trades(limit: int = 30) -> list[dict]:
     try:
         df = pd.read_csv(TRADES_FILE, dtype=str)
         return df.tail(limit).fillna("").iloc[::-1].to_dict(orient="records")
+    except Exception:
+        return []
+
+
+def load_cvd_history(n: int = 40) -> list[float]:
+    if not FEATURES_FILE.exists():
+        return []
+    try:
+        df = pd.read_csv(FEATURES_FILE, dtype=str, usecols=["timestamp", "cvd_delta_1m"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce", format="ISO8601")
+        df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
+        vals = pd.to_numeric(df["cvd_delta_1m"].tail(n), errors="coerce").fillna(0.0).tolist()
+        return [round(v, 2) for v in vals]
     except Exception:
         return []
 

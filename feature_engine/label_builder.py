@@ -101,7 +101,7 @@ def build_pending_labels() -> int:
         print("[LB] liquidations.csv chưa tồn tại.")
         return 0
 
-    df_feat = pd.read_csv(FEATURES_FILE)
+    df_feat = pd.read_csv(FEATURES_FILE, dtype=str)
     for col in ALL_LABEL_COLS:
         if col not in df_feat.columns:
             df_feat[col] = ""
@@ -126,6 +126,8 @@ def build_pending_labels() -> int:
         try:
             t_start = pd.Timestamp(row["timestamp"], tz="UTC")
         except Exception:
+            continue
+        if pd.isna(t_start):
             continue
 
         if t_start + max_horizon > now_utc:

@@ -6,9 +6,10 @@ Falls back to legacy LightGBM pkl if RF artifact missing.
 
 API:
     ctx = load_model()
-    prob = predict_cascade_prob(ctx, feature_row, "long")
-    curve = predict_cascade_curve(ctx, feature_row, "long")
+    result = predict_all(ctx, feature_row, price)   # 2 model calls — recommended
     signal = predict_cascade_signal(ctx, feature_row, price)
+    prob   = predict_cascade_prob(ctx, feature_row, "long")
+    curve  = predict_cascade_curve(ctx, feature_row, "long")
 """
 
 import json
@@ -27,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import (
     USE_MAKER, MAKER_OFFSET_PCT,
     CASCADE_TP_PCT, CASCADE_SL_PCT,
-    HORIZONS, ML_DIR,
+    HORIZONS, ML_DIR, MAX_TTC,
 )
 
 SAVED_DIR = ML_DIR
@@ -117,7 +118,7 @@ def load_model() -> dict:
     }
 
 
-def _build_input(ctx: dict, feature_row: dict) -> np.ndarray:
+def _build_input(ctx: dict, feature_row: dict) -> pd.DataFrame:
     features   = ctx["features"]
     row_values = []
     _bool_cols = {"funding_long_heavy", "funding_short_heavy", "basis_positive"}
@@ -135,7 +136,7 @@ def _build_input(ctx: dict, feature_row: dict) -> np.ndarray:
         else:
             val = np.nan if val is None else float(val)
         row_values.append(val)
-    return np.array([row_values], dtype=float)
+    return pd.DataFrame([row_values], columns=features)
 
 
 def predict_cascade_prob(ctx: dict, feature_row: dict, direction: str) -> float | None:
@@ -167,6 +168,10 @@ def predict_cascade_curve(ctx: dict, feature_row: dict, direction: str) -> dict:
 def predict_time_to_cascade(ctx: dict, feature_row: dict, direction: str) -> float | None:
     """Ước tính phút đến cascade từ curve: horizon nhỏ nhất mà prob >= 0.50."""
     curve = predict_cascade_curve(ctx, feature_row, direction)
+    return _ttc_from_curve(curve)
+
+
+def _ttc_from_curve(curve: dict) -> float | None:
     for h in HORIZONS:
         p = curve.get(h)
         if p is not None and p >= 0.50:
@@ -174,60 +179,93 @@ def predict_time_to_cascade(ctx: dict, feature_row: dict, direction: str) -> flo
     return None
 
 
+def _build_signal_dict(
+    ctx: dict, direction: str, prob: float, ttc: float | None, current_price: float
+) -> dict:
+    """Tạo signal dict từ prob/ttc đã tính sẵn — không gọi thêm model."""
+    if direction == "long":
+        entry = round(current_price * (1 - MAKER_OFFSET_PCT), 2) if USE_MAKER else round(current_price, 2)
+        tp    = round(entry * (1 + CASCADE_TP_PCT), 2)
+        sl    = round(entry * (1 - CASCADE_SL_PCT), 2)
+        sig   = "CASCADE_LONG"
+    else:
+        entry = round(current_price * (1 + MAKER_OFFSET_PCT), 2) if USE_MAKER else round(current_price, 2)
+        tp    = round(entry * (1 - CASCADE_TP_PCT), 2)
+        sl    = round(entry * (1 + CASCADE_SL_PCT), 2)
+        sig   = "CASCADE_SHORT"
+    return {
+        "signal":      sig,
+        "direction":   direction,
+        "prob":        round(prob, 4),
+        "entry":       entry,
+        "tp":          tp,
+        "sl":          sl,
+        "rr":          round(CASCADE_TP_PCT / CASCADE_SL_PCT, 2),
+        "est_minutes": ttc,
+        "threshold":   ctx.get("threshold", 0.70),
+        "order_type":  "maker" if USE_MAKER else "market",
+    }
+
+
+def predict_all(
+    ctx: dict,
+    feature_row: dict,
+    current_price: float,
+    max_ttc: float | None = None,
+) -> dict:
+    """
+    Full prediction pass dùng đúng 2 model calls (curve_long + curve_short).
+    Derive prob, ttc, signal từ curve — không gọi thêm inference.
+
+    Returns:
+        prob_long, curve_long, ttc_long,
+        prob_short, curve_short, ttc_short,
+        signal (dict | None)
+    """
+    if max_ttc is None:
+        max_ttc = MAX_TTC
+
+    out: dict = {}
+    for direction in ("long", "short"):
+        curve = predict_cascade_curve(ctx, feature_row, direction)
+        probs = [p for p in curve.values() if p is not None]
+        prob  = round(max(probs), 4) if probs else None
+        ttc   = _ttc_from_curve(curve)
+        out[f"prob_{direction}"]  = prob
+        out[f"curve_{direction}"] = curve
+        out[f"ttc_{direction}"]   = ttc
+
+    signal    = None
+    threshold = ctx.get("threshold", 0.70)
+    if current_price and current_price > 0:
+        for direction in ("long", "short"):
+            prob = out[f"prob_{direction}"]
+            ttc  = out[f"ttc_{direction}"]
+            if prob is None or prob < threshold:
+                continue
+            if ttc is None or ttc > max_ttc:
+                continue
+            signal = _build_signal_dict(ctx, direction, prob, ttc, current_price)
+            break
+    out["signal"] = signal
+    return out
+
+
 def predict_cascade_signal(
     ctx: dict,
     feature_row: dict,
     current_price: float,
-    max_ttc: float = 2.0,
+    max_ttc: float | None = None,
 ) -> dict | None:
     """
     Signal condition:
-      - cascade_prob_long >= threshold AND time_to_cascade_long <= max_ttc
+      - cascade_prob_long  >= threshold AND time_to_cascade_long  <= max_ttc
       - cascade_prob_short >= threshold AND time_to_cascade_short <= max_ttc
     Ưu tiên LONG. Trả về signal dict hoặc None.
     """
     if current_price is None or current_price <= 0:
         return None
-
-    threshold = ctx.get("threshold", 0.70)
-
-    for direction in ("long", "short"):
-        prob = predict_cascade_prob(ctx, feature_row, direction)
-        if prob is None or prob < threshold:
-            continue
-
-        ttc = predict_time_to_cascade(ctx, feature_row, direction)
-        if ttc is None or ttc > max_ttc:
-            continue
-
-        if direction == "long":
-            entry = round(current_price * (1 - MAKER_OFFSET_PCT), 2) if USE_MAKER else round(current_price, 2)
-            tp    = round(entry * (1 + CASCADE_TP_PCT), 2)
-            sl    = round(entry * (1 - CASCADE_SL_PCT), 2)
-            sig   = "CASCADE_LONG"
-        else:
-            entry = round(current_price * (1 + MAKER_OFFSET_PCT), 2) if USE_MAKER else round(current_price, 2)
-            tp    = round(entry * (1 - CASCADE_TP_PCT), 2)
-            sl    = round(entry * (1 + CASCADE_SL_PCT), 2)
-            sig   = "CASCADE_SHORT"
-
-        rr         = CASCADE_TP_PCT / CASCADE_SL_PCT
-        order_type = "maker" if USE_MAKER else "market"
-
-        return {
-            "signal":      sig,
-            "direction":   direction,
-            "prob":        round(prob, 4),
-            "entry":       entry,
-            "tp":          tp,
-            "sl":          sl,
-            "rr":          round(rr, 2),
-            "est_minutes": ttc,
-            "threshold":   threshold,
-            "order_type":  order_type,
-        }
-
-    return None
+    return predict_all(ctx, feature_row, current_price, max_ttc)["signal"]
 
 
 def model_info(ctx: dict) -> None:

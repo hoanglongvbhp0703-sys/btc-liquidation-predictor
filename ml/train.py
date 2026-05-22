@@ -54,8 +54,13 @@ FEATURE_COLS = [
 
 
 def load_labeled_data() -> pd.DataFrame:
-    df = pd.read_csv(FEATURES_FILE)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    try:
+        df = pd.read_csv(FEATURES_FILE)
+    except (pd.errors.EmptyDataError, Exception) as e:
+        raise RuntimeError(f"[TRAIN] Không đọc được {FEATURES_FILE}: {e}") from e
+    if df.empty:
+        raise RuntimeError(f"[TRAIN] {FEATURES_FILE} rỗng — bỏ qua lần train này.")
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce", format="ISO8601")
     return df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
 

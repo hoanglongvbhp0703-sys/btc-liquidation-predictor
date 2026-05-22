@@ -96,7 +96,7 @@ def _resolve_pending(outcomes: pd.DataFrame, features_df: pd.DataFrame) -> pd.Da
         return outcomes
 
     now = pd.Timestamp.now(tz="UTC")
-    feat_ts = pd.to_datetime(features_df["timestamp"], utc=True, errors="coerce")
+    feat_ts = pd.to_datetime(features_df["timestamp"], utc=True, errors="coerce", format="ISO8601")
 
     for idx in pending_idx:
         row      = outcomes.loc[idx]
@@ -285,7 +285,7 @@ def main():
 
             # Đọc features
             df = pd.read_csv(FEATURES_FILE)
-            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce", format="ISO8601")
             df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
             if df.empty:

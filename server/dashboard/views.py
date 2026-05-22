@@ -3,7 +3,7 @@ from django.http import JsonResponse
 from django.shortcuts import render
 from .data_reader import (
     load_klines_chart, load_liquidations,
-    load_trades, load_signal_state,
+    load_trades, load_signal_state, load_cvd_history,
 )
 
 
@@ -22,7 +22,10 @@ def index(request):
 
 
 def api_klines(request):
-    hours = max(0, int(request.GET.get("hours", 0)))
+    try:
+        hours = max(0, int(request.GET.get("hours", 0)))
+    except (ValueError, TypeError):
+        hours = 0
     return JsonResponse(load_klines_chart(hours=hours), safe=False)
 
 
@@ -31,10 +34,20 @@ def api_signal(request):
 
 
 def api_trades(request):
-    limit = int(request.GET.get("limit", 30))
+    try:
+        limit = int(request.GET.get("limit", 30))
+    except (ValueError, TypeError):
+        limit = 30
     return JsonResponse(load_trades(limit=limit), safe=False)
 
 
 def api_liq(request):
-    hours = int(request.GET.get("hours", 4))
+    try:
+        hours = int(request.GET.get("hours", 4))
+    except (ValueError, TypeError):
+        hours = 4
     return JsonResponse(load_liquidations(hours=hours), safe=False)
+
+
+def api_cvd_history(request):
+    return JsonResponse(load_cvd_history(), safe=False)

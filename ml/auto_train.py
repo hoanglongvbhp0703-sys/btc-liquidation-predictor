@@ -60,7 +60,7 @@ def print_data_summary():
     if df is None:
         print("[AUTO-TRAIN] Không đọc được features_1m.csv.", flush=True)
         return
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce", format="ISO8601")
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
 
     total     = len(df)

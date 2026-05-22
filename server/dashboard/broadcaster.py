@@ -38,11 +38,9 @@ _prev_price  = None
 _started     = False
 _lock        = threading.Lock()
 
-# Cache predictions per feature-row timestamp — re-run model only when features update (~1 min)
-_pred_cache: dict = {}
-_pred_cache_ts: str | None = None
-_sig_cache: dict | None = None
-_sig_cache_ts: str | None = None
+# Cache: re-run model only when feature timestamp changes (~1 min)
+_cache:    dict     = {}
+_cache_ts: str | None = None
 
 
 def _current_model_mtime() -> float | None:
@@ -66,69 +64,29 @@ def _try_load_model():
         print(f"[BC] Model load error: {e}")
 
 
-def _predict_cascade(feature_row: dict, direction: str) -> tuple[float | None, dict, float | None]:
-    """Returns (prob, curve_dict, time_to_cascade)."""
-    if _model_ctx is None:
-        return None, {}, None
-    try:
-        import predict as _predict
-        prob  = _predict.predict_cascade_prob(_model_ctx, feature_row, direction)
-        curve = _predict.predict_cascade_curve(_model_ctx, feature_row, direction)
-        ttc   = _predict.predict_time_to_cascade(_model_ctx, feature_row, direction)
-        return prob, curve, ttc
-    except Exception:
-        return None, {}, None
+def _get_all_predictions(feat: dict, price: float) -> dict:
+    """predict_all một lần mỗi khi feat_ts thay đổi (~60s).
 
-
-def _get_predictions(feat: dict) -> tuple:
-    """Run model predictions, caching result per feature timestamp.
-
-    Features update every ~60s — no need to run the ensemble on every 1s tick.
-    Returns (prob_long, curve_long, ttc_long, prob_short, curve_short, ttc_short).
+    2 model calls (curve_long + curve_short) → derive prob, ttc, signal.
+    Cache hit (59/60 ticks) trả về ngay, không inference.
     """
-    global _pred_cache, _pred_cache_ts
+    global _cache, _cache_ts
 
     feat_ts = feat.get("timestamp") if feat else None
+    if feat_ts is not None and feat_ts == _cache_ts:
+        return _cache
 
-    if feat_ts is not None and feat_ts == _pred_cache_ts:
-        return (
-            _pred_cache.get("prob_long"),
-            _pred_cache.get("curve_long", {}),
-            _pred_cache.get("ttc_long"),
-            _pred_cache.get("prob_short"),
-            _pred_cache.get("curve_short", {}),
-            _pred_cache.get("ttc_short"),
-        )
-
-    prob_long,  curve_long,  ttc_long  = _predict_cascade(feat, "long")
-    prob_short, curve_short, ttc_short = _predict_cascade(feat, "short")
-
-    _pred_cache_ts = feat_ts
-    _pred_cache = {
-        "prob_long":   prob_long,  "curve_long":  curve_long,  "ttc_long":  ttc_long,
-        "prob_short":  prob_short, "curve_short": curve_short, "ttc_short": ttc_short,
-    }
-
-    return prob_long, curve_long, ttc_long, prob_short, curve_short, ttc_short
-
-
-def _predict_signal(feature_row: dict, price: float) -> dict | None:
-    global _sig_cache, _sig_cache_ts
-    if _model_ctx is None or price is None:
-        return None
-
-    feat_ts = feature_row.get("timestamp") if feature_row else None
-    if feat_ts is not None and feat_ts == _sig_cache_ts:
-        return _sig_cache
+    if _model_ctx is None:
+        return {}
 
     try:
         import predict as _predict
-        result = _predict.predict_cascade_signal(_model_ctx, feature_row, price)
+        result = _predict.predict_all(_model_ctx, feat, price)
     except Exception:
-        result = None
+        result = {}
 
-    _sig_cache_ts = feat_ts
-    _sig_cache    = result
+    _cache_ts = feat_ts
+    _cache    = result
     return result
 
 
@@ -177,9 +135,13 @@ def _build_tick() -> dict:
 
     cvd_1m = round(_f(feat, "cvd_delta_1m") or 0.0, 2)
 
-    prob_long, curve_long, ttc_long, prob_short, curve_short, ttc_short = (
-        _get_predictions(feat) if feat else (None, {}, None, None, {}, None)
-    )
+    preds       = _get_all_predictions(feat, price) if (feat and price) else {}
+    prob_long   = preds.get("prob_long")
+    curve_long  = preds.get("curve_long",  {})
+    ttc_long    = preds.get("ttc_long")
+    prob_short  = preds.get("prob_short")
+    curve_short = preds.get("curve_short", {})
+    ttc_short   = preds.get("ttc_short")
 
     # Signal: ưu tiên paper trade đang mở
     active_paper = read_active_signal()
@@ -189,8 +151,7 @@ def _build_tick() -> dict:
             raw_sig["signal"] = "CASCADE_LONG"
         cascade_signal = _sig_dict(raw_sig)
     else:
-        raw_sig = _predict_signal(feat, price) if feat else None
-        cascade_signal = _sig_dict(raw_sig)
+        cascade_signal = _sig_dict(preds.get("signal"))
 
     return {
         "ts":                  kline["ts"] if kline else None,

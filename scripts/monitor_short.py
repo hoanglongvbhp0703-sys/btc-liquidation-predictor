@@ -159,7 +159,7 @@ def main():
 
             # Đọc features
             df = pd.read_csv(FEATURES_FILE)
-            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce", format="ISO8601")
             for h in HORIZONS:
                 df[f"cascade_short_{h}m"] = pd.to_numeric(
                     df[f"cascade_short_{h}m"], errors="coerce"

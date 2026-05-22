@@ -177,7 +177,7 @@ def main():
 
             # Đọc row mới nhất từ features_1m.csv
             df = pd.read_csv(FEATURES_FILE)
-            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce", format="ISO8601")
             df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
 
             if df.empty:

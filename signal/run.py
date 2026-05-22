@@ -1,10 +1,10 @@
 """
 run.py — Tầng 5: Signal Output (Cascade Liquidation)
 
-Mỗi 1 phút:
+Mỗi 10 giây:
   1. Đọc feature row mới nhất từ features_1m.csv
   2. Predict cascade probability + timing (Ensemble RF+LR+XGB)
-  3. Nếu cascade_prob >= 0.70 AND time_to_cascade <= 2m → ghi paper trade
+  3. Nếu cascade_prob >= SIGNAL_THRESHOLD AND time_to_cascade <= MAX_TTC → ghi paper trade
   4. Check outcome trades cũ
   5. In stats mỗi 1 giờ
 """
@@ -67,7 +67,7 @@ def load_latest_feature_row() -> dict | None:
         df = pd.read_csv(FEATURES_FILE, dtype=str)
         if df.empty:
             return None
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce", format="ISO8601")
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
         return df.iloc[-1].to_dict()
     except Exception as e:
