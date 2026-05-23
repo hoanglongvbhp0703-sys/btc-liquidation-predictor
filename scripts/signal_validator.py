@@ -52,12 +52,25 @@ def _load_models():
         for h in HORIZONS:
             p = ML_DIR / f"ens_cascade_{direction}_{h}m.pkl"
             if p.exists():
-                art = pickle.load(open(p, "rb"))
-                models[direction][h] = (art["models"][0], art["imputer"])
+                models[direction][h] = pickle.load(open(p, "rb"))
     meta_path = ML_DIR / "meta.json"
     meta  = json.loads(meta_path.read_text()) if meta_path.exists() else {}
     mtime = meta_path.stat().st_mtime if meta_path.exists() else 0
     return models, meta, mtime
+
+
+def _ensemble_prob(art: dict, X_raw: np.ndarray) -> float:
+    imp    = art["imputer"]
+    scaler = art.get("scaler")
+    names  = art.get("model_names", [])
+    X_imp  = imp.transform(X_raw)
+    X_sc   = scaler.transform(X_imp) if scaler is not None else None
+    probs  = []
+    for i, m in enumerate(art["models"]):
+        name = names[i] if i < len(names) else ""
+        X_in = X_sc if (name == "LogisticReg" and X_sc is not None) else X_imp
+        probs.append(float(m.predict_proba(X_in)[0][1]))
+    return float(np.mean(probs))
 
 
 def _predict_row(row: pd.Series, models: dict) -> dict:
@@ -66,8 +79,8 @@ def _predict_row(row: pd.Series, models: dict) -> dict:
     probs  = {}
     for direction, hmodels in models.items():
         probs[direction] = {}
-        for h, (rf, imp) in hmodels.items():
-            probs[direction][h] = float(rf.predict_proba(imp.transform(X_raw))[0][1])
+        for h, art in hmodels.items():
+            probs[direction][h] = _ensemble_prob(art, X_raw)
     return probs
 
 
