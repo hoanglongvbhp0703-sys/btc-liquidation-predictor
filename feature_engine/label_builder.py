@@ -9,20 +9,20 @@ Cascade SHORT (cascade_short_Xm):
   = 1 nếu sum(liq_long_usd[T→T+Xm]) > 3 × avg_liq_long_pm × X
   Ý nghĩa: LONG bị liq nhiều → giá GIẢM → SHORT trade opportunity
 
-liq_short_usd = usd_value where side == 'BUY'  (SHORT position bị liquidated)
-liq_long_usd  = usd_value where side == 'SELL' (LONG position bị liquidated)
-
-time_to_cascade_long/short:
-  = first h ∈ {1, 2, 3} where cascade_hm == 1, else NaN
+TP-hit labels (tp_hit_short_Xm / tp_hit_long_Xm):
+  = 1 nếu giá chạm TP (CASCADE_TP_PCT) tại bất kỳ phút nào trong [T+1 .. T+X]
+  Dùng close price từ features_1m — gần đúng (bỏ qua intra-minute move)
+  Đây là label trực tiếp đo "có profitable không" thay vì proxy liquidation event
 """
 
 import pandas as pd
+import numpy as np
 from pathlib import Path
 from datetime import timedelta
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import FEATURES_FILE, LIQ_FILE
+from config import FEATURES_FILE, LIQ_FILE, CASCADE_TP_PCT
 
 HORIZONS         = [1, 2, 3]
 LOOKBACK_MINUTES = 30   # baseline từ 30 phút lịch sử
@@ -185,7 +185,55 @@ def build_pending_labels() -> int:
             print(f"[LB] {col}: labeled={n}  pos={pos}  base_rate={br:.1%}")
 
     print(f"[LB] Labeled {labeled_count} rows this run | pending (too recent): {skipped}")
+    build_tp_labels(df_feat)
     return labeled_count
+
+
+def build_tp_labels(df_feat: pd.DataFrame | None = None) -> None:
+    """
+    Vectorized: tính tp_hit_short_Xm / tp_hit_long_Xm từ current_price.
+
+    tp_hit_short_Xm = 1 nếu min(close[T+1..T+X]) <= close[T] * (1 - TP_PCT)
+    tp_hit_long_Xm  = 1 nếu max(close[T+1..T+X]) >= close[T] * (1 + TP_PCT)
+
+    Dùng close price 1m làm xấp xỉ (bỏ qua intra-minute move).
+    Không cần liq data — chỉ cần features_1m.csv.
+    """
+    if df_feat is None:
+        if not FEATURES_FILE.exists():
+            return
+        df_feat = pd.read_csv(FEATURES_FILE, dtype=str)
+
+    price = pd.to_numeric(df_feat.get("current_price", pd.Series(dtype=float)), errors="coerce")
+    if price.isna().all():
+        return
+
+    for h in HORIZONS:
+        col_s = f"tp_hit_short_{h}m"
+        col_l = f"tp_hit_long_{h}m"
+
+        # min/max close price trong window [T+1 .. T+h]
+        fwd_prices = pd.concat([price.shift(-i) for i in range(1, h + 1)], axis=1)
+        min_fwd = fwd_prices.min(axis=1)
+        max_fwd = fwd_prices.max(axis=1)
+
+        hit_s = ((min_fwd - price) / price <= -CASCADE_TP_PCT).astype(float)
+        hit_l = ((max_fwd - price) / price >=  CASCADE_TP_PCT).astype(float)
+
+        # Cuối file không có future data → NaN
+        hit_s.iloc[-h:] = float("nan")
+        hit_l.iloc[-h:] = float("nan")
+
+        df_feat[col_s] = hit_s.values
+        df_feat[col_l] = hit_l.values
+
+    df_feat.to_csv(FEATURES_FILE, index=False)
+
+    for h in HORIZONS:
+        for d, col in [("short", f"tp_hit_short_{h}m"), ("long", f"tp_hit_long_{h}m")]:
+            s   = pd.to_numeric(df_feat[col], errors="coerce").dropna()
+            pos = (s == 1).sum()
+            print(f"[LB] tp_hit_{d}_{h}m: pos={pos} / {len(s)} = {pos/len(s):.2%}")
 
 
 def label_summary() -> dict:

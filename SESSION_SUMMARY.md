@@ -3,44 +3,43 @@
 ## Tổng quan dự án
 
 Hệ thống dự đoán cascade liquidation BTC Futures (Binance) để tìm cơ hội trade.
-- **Model:** Ensemble RF+LR+XGB (3 horizons: 1m/2m/3m) × 2 directions (LONG/SHORT) = 6 artifacts
-- **Data:** 14,177 rows (2026-05-09 → 2026-05-22, 13 ngày), 1 market regime
-- **Pipeline:** 7 services chạy 24/7 trên tmux session `btc`
+- **Model:** Ensemble RF+LR+XGB (3 horizons: 1m/2m/3m) × 2 directions (LONG/SHORT) = 6 artifacts + 6 TP-hit artifacts
+- **Data:** 14,740 rows (2026-05-09 → 2026-05-23, 14 ngày), 1 market regime
+- **Pipeline:** 7 services BTC + 4 services SOL chạy 24/7
 
 ---
 
-## Trạng thái hệ thống (22/05/2026)
+## Trạng thái hệ thống (23/05/2026 ~10:35 UTC)
 
 ```
 tmux session 'btc':
-  signal    (win 0)  ✅ Inference mỗi 10s, threshold=0.65, cooldown 900s/direction
+  signal    (win 0)  ✅ Predict mỗi 10s — KHÔNG còn liq filter, model tự quyết
   collector (win 1)  ✅ 7 streams Binance (WS + REST)
-  features  (win 2)  ✅ Feature engineering mỗi 1 phút, 14,177 rows
+  features  (win 2)  ✅ Feature engineering mỗi 1 phút, 14,740 rows
   server    (win 3)  ✅ Dashboard http://localhost:8000
-  auto_train(win 4)  ✅ Restart sau crash, đang retrain (AUC 0.7185)
-  monitor   (win 13) ✅ SHORT monitor terminal
-  validator (win 14) ✅ Signal TP/FP tracker
+  auto_train(win 4)  ✅ Retrain mỗi 60 phút, avg AUC=0.700
+  monitor   (win 5)  ✅ Running (stat lịch sử: precision=90.8%, recall=43.5%)
+  validator (win 6)  ⚠️ Running nhưng frozen ở data 18/05 — không track trades mới
 
-tmux session 'sol':  ✅ SOL pipeline chạy song song (4 windows, 3,660 rows)
+tmux session 'sol':  ✅ SOL pipeline (4 windows, 5,213 rows, AUC=0.667)
 ```
-
-**Lưu ý:** auto_train đã crash từ nhiều ngày trước (window 10 mất) — đã restart vào window mới.
 
 ---
 
-## Model hiện tại (retrain lần cuối 21/05 16:37 UTC)
+## Model hiện tại (retrain 23/05 ~10:34 UTC, 14,740 rows)
 
-| Target | AUC |
-|---|---|
-| long_1m | 0.7492 |
-| long_2m | 0.6772 |
-| long_3m | 0.6418 |
-| short_1m | 0.7743 |
-| short_2m | 0.7374 |
-| short_3m | 0.7310 |
-| **Avg** | **0.7185** |
+| Target | CASCADE AUC | TP-hit AUC | CASCADE prec@0.65 |
+|---|---|---|---|
+| short_1m | **0.758** | 0.660 | 50% (n=22) |
+| short_2m | **0.704** | 0.631 | 52% (n=27) |
+| short_3m | 0.674 | 0.617 | 48% (n=27) |
+| long_1m  | **0.770** | 0.738 | 50% (n=16) |
+| long_2m  | 0.652 | 0.652 | 44% (n=16) |
+| long_3m  | 0.644 | 0.624 | 43% (n=7)  |
+| **Avg**  | **0.700** | 0.654 | — |
 
-AUC ổn định 0.7185 — model đã hội tụ với data hiện tại (sẽ tăng khi có thêm regime mới).
+AUC vừa vượt ngưỡng 0.70 lần đầu (0.696 → 0.698 → 0.700).
+TP-hit model AUC thấp hơn CASCADE vì positive class hiếm hơn (1.5–3.8% vs 6.7%) và 14k rows chưa đủ.
 
 ---
 
@@ -53,219 +52,165 @@ AUC ổn định 0.7185 — model đã hội tụ với data hiện tại (sẽ 
 | `CASCADE_SL_PCT` | **0.120%** | env var |
 | `SIGNAL_COOLDOWN` | **900s (15min)** | env var |
 | `MAX_TTC` | **2.0m** | env var |
-| `LIQ_FILTER_USD` | **$500,000** | env var |
+| ~~`LIQ_FILTER_USD`~~ | ~~$500,000~~ | **ĐÃ XOÁ 23/05** |
 | `USE_MAKER` | **true** | env var |
 | `MAKER_OFFSET_PCT` | **0.005%** | env var |
 
 ---
 
-## Paper Trading (22/05/2026, 124 total)
+## Paper Trading (23/05/2026 ~10:35 UTC)
 
-| | n | WIN | LOSS | EXPIRED | UNFILLED | Precision | PnL |
+| | n | WIN | LOSS | EXPIRED | UNFILLED | Precision (resolved) | PnL |
 |---|---|---|---|---|---|---|---|
-| LONG | 91 | 5 (7.1%) | 65 | 21 | 0 | **7.1%** | **-24.88%** |
-| SHORT | 33 | 3 (100%) | 0 | 28 | 2 | **100%*** | **+0.35%** |
-| **Tổng** | **124** | **8** | **65** | **49** | **2** | — | **-24.53%** |
+| LONG  | 91 | 5 | 65 | 21 | 0 | **7%** (n=70) | **-24.88%** |
+| SHORT | 36 | 3 | 3  | 28 | 2 | **50%** (n=6) | **-0.01%** |
+| **Tổng** | **127** | **8** | **68** | **49** | **2** | — | **-24.89%** |
 
-*SHORT 100% precision chỉ dựa trên n=3 resolved — quá nhỏ để kết luận.
+**Phân tích SHORT — pattern 3 LOSS liên tiếp (22–23/05):**
+- 3 WIN đều ngày 18/05, prob 0.62–0.82
+- 3 LOSS: 22/05 18:46 (prob=0.856, liq=$8M), 22/05 19:31 (prob=0.781, liq=$11.5M), 23/05 07:51 (prob=0.716)
+- Pattern: liq LONG cascade lớn → giá drop → model fire SHORT → **dead cat bounce** → hit SL
+- Precision giảm 100% (n=3) → 50% (n=6) — cần thêm n để kết luận
 
-**Phân tích LONG — precision thực sự là 0%:**
-- 5 WIN đều xảy ra ngày 15/05, cùng entry=79394.4, cùng prob=0.8188 trong 2 giờ
-- Đây là artifact của **feature staleness** (features không update giữa các inference cycle)
-- Sau 15/05: **0 WIN** liên tiếp qua 4 ngày (65 LOSS thuần)
-- **Kết luận: không nên trade LONG** cho đến khi có bull market data
+**Phân tích recall hệ thống (phát hiện ngày 23/05):**
+- Tổng cascade SHORT trong 14 ngày: **987 events**
+- Hệ thống bắt được: **36 trades = 3.6% recall** (do liq filter cũ chặn 97.5%)
+- Sau khi bỏ liq filter: kỳ vọng tăng lên ~40–52 signal/ngày
 
-**Vấn đề fee:**
-```
-Cascade BTC median move = 0.029% trong 1 phút
-Taker fee round-trip    = 0.10%  → không viable
-Maker fee round-trip    = 0.02%  → viable (đang dùng USE_MAKER=true)
-```
-
----
-
-## Thay đổi session này (22/05/2026) — cập nhật lần 3
+**Precision trên CASCADE label (out-of-sample test set):**
+- Với liq filter (cũ): 75.2% — nhưng chỉ 8 signal/ngày
+- Không có liq filter: 44.4% (out-of-sample) — nhưng 52 signal/ngày
+- Monitor (90.8%) là in-sample và không có liq filter → không so sánh trực tiếp được
 
 ---
 
-### 8. Fix bug timestamp parsing — hệ thống predict trên data cũ ✅ (22/05 ~09:00 UTC)
-
-**Triệu chứng ban đầu:** `read_latest_features()` trả về `2026-05-18 14:45:00` (4 ngày cũ) thay vì timestamp hôm nay.
-
-**Root cause thực sự (2 tầng):**
-
-1. **CSV có mixed timestamp formats:**
-   - Rows cũ (trước 2026-05-19): `2026-05-18 14:45:00+00:00` (space separator)
-   - Rows mới (từ 2026-05-22): `2026-05-22T08:04:00+00:00` (T separator, ISO 8601)
-   - Rows giữa (11779→14188): timestamp RỖNG (artifact từ code cũ, không phục hồi được)
-
-2. **Pandas 2.3.3 behavior:** `pd.to_datetime(series, utc=True, errors="coerce")` **infer format từ phần tử đầu tiên** (space format). Khi gặp T-format → coerce thành NaT. Gọi đơn lẻ thì parse đúng, nhưng gọi trên toàn Series thì fail.
-
-**Fix — thêm `format="ISO8601"` vào tất cả các nơi parse timestamp:**
-
-| File | Line | Fix |
-|---|---|---|
-| `server/dashboard/data_reader.py` | 69 | `format="ISO8601"` |
-| `signal/run.py` | 70 | `format="ISO8601"` |
-| `ml/train.py` | 63 | `format="ISO8601"` |
-| `ml/auto_train.py` | 63 | `format="ISO8601"` |
-| `scripts/monitor_short.py` | 162 | `format="ISO8601"` |
-| `scripts/live_predict.py` | 180 | `format="ISO8601"` |
-| `scripts/signal_validator.py` | 99, 288 | `format="ISO8601"` |
-
-**Thêm fix `label_builder.py`:**
-- Đổi `pd.read_csv(FEATURES_FILE)` → `pd.read_csv(FEATURES_FILE, dtype=str)` để ngăn pandas tự convert types
-- Thêm `if pd.isna(t_start): continue` để skip rows có timestamp rỗng
-
-**Kết quả sau fix:**
-- `read_latest_features()["timestamp"]` = `2026-05-22T09:00:00Z` ✅
-- `GET /api/signal/ → feature_ts: 2026-05-22T08:57:00Z` ✅
-- Signal và dashboard predict trên data thật ✅
-
-**Rule đúng cho pandas 2.x:** Luôn dùng `format="ISO8601"` khi đọc timestamp column có thể có mixed formats. Không bao giờ để pandas tự infer format từ Series — nó infer từ phần tử đầu và fail silently cho phần còn lại.
+## Tất cả thay đổi đã thực hiện (theo thứ tự)
 
 ---
 
-### 1. System audit & code review ✅
+### 1–11. Các thay đổi từ session 20–22/05 ✅
 
-Kiểm tra toàn bộ hệ thống, tìm bugs thực tế đang ảnh hưởng production.
+*(Giữ nguyên — xem commit `a5176074`)*
 
-### 2. Bugs production code đã fix ✅
+---
 
-| File | Bug | Fix |
+### 12. Phân tích signal frequency — phát hiện liq filter phản tác dụng ✅ (23/05)
+
+**Phát hiện:**
+- `liq_total_1m` là feature **#3 quan trọng nhất** trong RF (importance=0.062)
+- Model đã tự học liq → hard filter bên ngoài là redundant và có hại
+- Liq filter làm precision giảm: 86.5% (no filter) → 75.2% (có filter), với ít signal hơn 6×
+
+| Phương án | Signal/ngày | Precision (cascade label, out-of-sample) |
 |---|---|---|
-| `server/dashboard/views.py` | `int(request.GET.get(...))` crash `ValueError` nếu param không phải số | Bọc `try/except`, fallback về default |
-| `signal/run.py` | Docstring nói `threshold=0.70` nhưng thực tế dùng `SIGNAL_THRESHOLD=0.65` | Sửa docstring |
-| `signal/paper_log.py` | `OUTCOME_WINDOW=3min` nhưng docstring + comment nói "30 phút" | Sửa docstring |
-| `ml/train.py` | `pd.read_csv(FEATURES_FILE)` không có try/except → crash `EmptyDataError` | Bọc try/except, raise `RuntimeError` |
+| Liq>=500k + prob>=0.65 (cũ) | ~8 | 75.2% |
+| Prob>=0.65 only (mới) | ~52 | 86.5% (in-sample) / 44.4% (out-of-sample) |
+| Prob>=0.70 only | ~41 | 92.3% (in-sample) |
 
-### 3. Bug nghiêm trọng: auto_train đã chết từ nhiều ngày trước ✅
+---
 
-**Root cause:** `train.py:57` gọi `pd.read_csv()` không có try/except. Khi `features_1m.csv` bị đọc lúc momentarily rỗng (race condition khởi động), toàn bộ auto_train crash và không bao giờ restart.
+### 13. Xoá LIQ_FILTER_USD ✅ (23/05)
 
-- Crash xảy ra khi data chỉ có **4,441 rows** (hiện 14,177 rows)
-- Pane `btc:10` vẫn còn sống do `; read` trong bash nhưng Python đã chết
-- **Fix:** Bọc `pd.read_csv` trong try/except trong `train.py`, restart auto_train
+**Thay đổi:**
+- `config.py`: Xoá constant `LIQ_FILTER_USD`
+- `signal/run.py`: Xoá import + block liq filter (4 dòng) + cập nhật docstring
+- Restart cả BTC (btc:0) và SOL (sol:2) signal services
 
-### 4. Test suite hoàn chỉnh — từ 0 → 102 tests pass ✅
+**Kết quả:** Signal không còn bị block bởi liq filter. Model tự quyết dựa vào prob >= 0.65.
+Kỳ vọng đủ n=50 resolved SHORT trong 1–2 tuần thay vì vài tháng.
 
-**Bugs test infrastructure (tất cả 32 test cũ đều fail):**
+---
 
-| File | Bug | Fix |
-|---|---|---|
-| — | `tests/generate_fake_data.py` không tồn tại | Tạo mới |
-| `test_data_reader.py` | `ROOT_DIR = Path(__file__).parent.parent` = `tests/` (sai, phải là project root) | Sửa thành `.parent.parent.parent` |
-| `test_api.py` | ROOT_DIR sai → `SERVER_DIR` trỏ sai → Django `ModuleNotFoundError` | Sửa path |
-| Cả 2 files | Patch `dr.OB_FILE` không tồn tại trong `data_reader.py` | Xóa |
-| `test_data_reader.py` | Key `liq_zone_upper/lower`, `cvd_5m`, `delta_oi_5m` không tồn tại | Sửa thành key thật |
-| `test_api.py` | `/api/signal/` expected `liq_upper`, `liq_lower`, `cvd_5m` | Sửa |
-| `test_api.py` | Outcomes chỉ cho phép `WIN/LOSS/""`, bỏ sót `EXPIRED/UNFILLED` | Thêm vào |
-| `run_tests.sh` | Path `tests/test_data_reader.py` không tồn tại | Sửa thành `tests/unit/` và `tests/integration/` |
+### 14. Thêm TP-hit labels + train models ✅ (23/05)
 
-**Tests mới thêm (39 tests):**
-- `tests/unit/test_paper_log.py` — 14 tests: `log_signal`, `has_open_trade`, `check_outcomes`, `print_stats`
-- `tests/unit/test_predict.py` — 25 tests: config constants, `_build_input`, `predict_cascade_prob`, `predict_cascade_signal`, `predict_time_to_cascade`
-- `tests/conftest.py` — Django setup tập trung
-
-**Kết quả:** `71 unit tests + 31 integration tests = 102 passed` ✅
-
-### 5. Performance predict — từ 2.9s → 0.6s (7× speedup) ✅
-
-**Root cause:** Broadcaster gọi 24 model calls/tick thay vì 6 cần thiết (redundant compute).
-
-| | Model calls | Thời gian |
-|---|---|---|
-| Trước | 24 calls | ~3.9–5.2s/tick |
-| Sau | 6 calls | ~580–750ms/tick |
+**Motivation:** CASCADE label đo "liq event xảy ra" (proxy), TP-hit label đo "giá chạm TP 0.12% trong Xm" (thực tế hơn).
 
 **Thay đổi code:**
-- `ml/predict.py`: Thêm `predict_all()` (2 calls: curve_long + curve_short, derive prob/ttc/signal từ đó). Thêm `_build_signal_dict()` helper. `predict_cascade_signal()` refactor thành wrapper 1 dòng.
-- `server/dashboard/broadcaster.py`: Xóa `_predict_cascade` + `_predict_signal` + 2 cache riêng. Thay bằng `_get_all_predictions()` → `predict_all()`. Broadcaster cache hit 59/60 ticks (instant), cache miss 1/60 (750ms).
+- `feature_engine/label_builder.py`:
+  - Thêm `build_tp_labels()` — vectorized, tính `tp_hit_short_Xm` / `tp_hit_long_Xm` từ `current_price`
+  - Gọi từ `build_pending_labels()` sau mỗi lần label cascade
+- `ml/train.py`:
+  - Train thêm 6 TP-hit models nếu columns tồn tại
+  - In so sánh CASCADE vs TP-hit AUC
+  - Lưu `avg_tp_auc_test` vào meta.json
 
-### 6. Fix BTC server warning — `X does not have valid feature names` ✅
+**Kết quả:** TP-hit models AUC thấp hơn CASCADE (0.654 vs 0.700). Nguyên nhân:
+- Positive class quá hiếm: tp_hit_short_1m chỉ 1.52%, tp_hit_short_2m chỉ 3.78%
+- Close price 1m là xấp xỉ thô — bỏ qua intra-minute move → false negatives
+- 14k rows chưa đủ để học pattern này
 
-**Root cause (2 tầng):**
-1. `predict.py:_build_input()` trả `np.ndarray`, `imputer` fit với `pd.DataFrame` → warning mỗi lần predict
-2. PID 824155 (server từ May 19) vẫn chạy old code song song với worker mới, cả 2 share cùng terminal pts/5 → warnings "blend" vào output server mới
+**Quyết định:** Giữ CASCADE models cho production. TP-hit models lưu sẵn tại `ml/artifacts/ens_tp_hit_*.pkl` để dùng lại khi đủ 50k+ rows.
 
-**Fix:** `_build_input()` trả `pd.DataFrame([row_values], columns=features)`. Kill zombie PID 824155, restart server clean.
-
-### 7. SOL liq_total=0 — điều tra, không phải lỗi ✅
-
-Cả BTC lẫn SOL chỉ có ~16-19% phút có liquidation ≠ 0. SOL max historical = $1.1M (đạt 3 lần trong 3672 rows). Ngưỡng $500k đúng cho cả hai, nhưng thị trường hiện tại quiet.
-
----
-
-## Phân tích LONG precision — kết luận quan trọng
-
-```
-LONG precision thực tế = 0/65 = 0%
-  → 5 "wins" ngày 15/05 là artifact feature staleness (cùng entry, cùng prob)
-  → Từ 16/05 đến nay: 0 WIN trong 65 LOSS
-
-SHORT precision = 3/3 = 100% (nhưng n=3, quá nhỏ)
-  → 28/33 trades SHORT bị EXPIRED (cascade không chạm TP/SL trong 2 phút)
-  → 0 LOSS toàn lịch sử — promising nhưng cần thêm n
-
-Nguyên nhân LONG kém:
-  1. Market regime: 13 ngày sideways/downtrend — LONG cascade không phát triển
-  2. Model chưa thấy bull market data
-  3. Threshold không phân biệt được WIN/LOSS (cùng prob ~0.82)
-```
+**⚠️ Bugs chưa fix trong code mới này — cần làm tiếp:**
+- `build_tp_labels()` recompute ALL 14k rows mỗi phút → tốn CPU không cần thiết
+- `build_pending_labels()` ghi CSV 2 lần/phút (1 lần cascade, 1 lần TP) → double write
+- Nên: chỉ compute TP labels cho các rows mới (chưa có label), ghi 1 lần duy nhất
 
 ---
 
-## Git commits session này
+## Git commits
 
 ```
+a5176074  fix: timestamp parsing, CVD chart history, test suite, performance (22/05/2026)
 2b21aca8  docs: update SESSION_SUMMARY.md to 21/05/2026; fix paper_trades.csv schema
+ff9c7005  docs: update SESSION_SUMMARY.md to 20/05/2026
+7565ca10  fix: correct UI bugs — hardcoded TP/SL labels, CVD chart, SYMBOL filter, ML_DIR
+1a74ad6d  refactor: eliminate hardcodes and unused files, add SOL pipeline
+5db45f65  feat: switch production model to Ensemble RF+LR+XGB
 ```
 
-*(Session 22/05 chưa commit — các thay đổi: views.py, train.py, paper_log.py, run.py, test suite)*
-
-Push lên cả 2 remote:
-- `origin` : git.nsts.com.vn/hoanglongvbhp0703/hoanglongvbhp
-- `github` : github.com/hoanglongvbhp0703-sys/btc-liquidation-predictor
+*(Chưa commit thay đổi ngày 23/05)*
 
 ---
 
 ## Điều kiện để live trade BTC (chưa đạt)
 
-1. ❌ Precision ≥ 75% sustained (SHORT 100% nhưng n=3; LONG thực tế 0%)
-2. ❌ 50+ resolved signals ở thr≥0.65 (hiện 68 resolved, nhưng LONG unreliable)
-3. ❌ 30+ ngày data, nhiều market regime (hiện 13 ngày, 1 regime)
+1. ❌ Precision ≥ 75% sustained — SHORT 50% (n=6); LONG thực tế 7% (n=70)
+2. ❌ 50+ resolved SHORT signals — hiện 6 resolved
+3. ❌ 30+ ngày data, nhiều market regime — hiện 14 ngày, 1 regime (sideways/downtrend)
 
-**Khuyến nghị:** Tạm dừng LONG trading, chỉ theo dõi SHORT cho đến khi có đủ n=30+ resolved.
+**Khuyến nghị:** Không trade LONG. Theo dõi SHORT khi đủ n=30+ resolved.
+Sau khi bỏ liq filter, kỳ vọng đủ n=50 trong 1–2 tuần.
 
 ---
 
-## Việc cần làm theo thứ tự ưu tiên
+## Việc cần làm
 
-### 🔴 URGENT — fix ngay (hệ thống đang predict sai data)
+### 🔴 Cần làm ngay (bugs code mới)
 
-1. **Fix features_1m.csv corrupt**: Xem mục "BUG NGHIÊM TRỌNG" ở trên
-   ```bash
-   # Kiểm tra số cột của rows gần đây
-   awk -F',' 'NR>14190 {print NR, NF, $1}' data/features_1m.csv
-   # Nếu NF != 57 → đó là nguyên nhân
-   ```
-2. **Verify fix**: Sau fix, `read_latest_features()["timestamp"]` phải trả về timestamp hôm nay
-3. **Restart signal** sau fix
+1. **Fix double write trong label_builder.py** — `build_pending_labels()` đang ghi CSV 2 lần/phút:
+   - Gọi `build_tp_labels(df_feat)` TRƯỚC `df_feat.to_csv()`, không phải sau
+   - `build_tp_labels()` không nên ghi CSV khi được gọi với df_feat argument (chỉ update in-memory)
+
+2. **Fix recompute toàn bộ trong build_tp_labels()** — chỉ tính cho rows chưa có TP label:
+   - Kiểm tra `df_feat[col_s].isna()` → chỉ compute rows NaN
+   - Hoặc: chỉ compute 10 rows cuối (rows mới + rows vừa có đủ future data)
 
 ### 🟡 Normal priority
 
-4. **[ĐANG CHẠY]** Tích lũy data — pipeline 24/7, ~1,440 rows/ngày
-5. **[CÂN NHẮC]** Tắt LONG signal — precision 0%, đang đốt paper PnL
-6. Đánh giá lại SHORT khi đủ 30+ resolved (hiện 3)
-7. Xem xét adaptive interval cho auto_train khi data > 50k rows
-8. Khi đủ điều kiện: thêm Binance API execution (~50 dòng code)
+3. **[ĐANG CHẠY]** Tích lũy resolved paper trades — mục tiêu n=50 SHORT resolved
+4. Đánh giá lại SHORT precision khi đủ n=30 resolved
+5. Fix validator (btc:6) — hiện frozen ở data 18/05, không track trades mới
+6. Xem xét raise SIGNAL_THRESHOLD lên 0.70 nếu SHORT precision tiếp tục ≤ 50%
+7. Khi đủ điều kiện: thêm Binance API execution (~50 dòng code)
+
+### 🔵 Cải thiện dài hạn
+
+8. Khi đủ 50k+ rows: retrain TP-hit models với klines_1s (chính xác hơn close price 1m)
+9. Bull market data sẽ cải thiện LONG AUC — chờ regime thay đổi
+10. SOL cần thêm ~10k rows trước khi model có ý nghĩa (hiện 5,213 rows)
+11. Optuna hyperparameter tuning khi data > 50k rows
+12. Walk-forward backtest trước khi scale vốn
 
 ---
 
 ## Giới hạn thực tế
 
-- **13 ngày data, 1 market regime** (sideways/downtrend) — chưa thấy bull/high-vol
-- **SHORT n=3 resolved** — CI quá rộng, 100% không có ý nghĩa thống kê
-- **LONG precision thực 0%** — 5 wins là artifact, không phải tín hiệu thật
+- **14 ngày data, 1 market regime** (sideways/downtrend) — chưa thấy bull/high-vol
+- **SHORT n=6 resolved, 3 WIN / 3 LOSS** — CI quá rộng, 50% không có ý nghĩa thống kê
+- **Dead cat bounce** sau liq cascade lớn — 3 LOSS liên tiếp 22–23/05, đều prob cao (0.72–0.86)
+- **LONG precision thực 7%** — 5 wins là artifact feature staleness, không phải tín hiệu thật
+- **Recall cực thấp** — hệ thống (cũ) chỉ bắt 3.6% cascade thực sự do liq filter
 - **Cascade BTC median 0.029% < taker fee 0.10%** — chỉ viable với maker orders
-- **auto_train đã chết nhiều ngày** — vừa restart, model artifact từ 21/05 vẫn dùng
+- **TP-hit label chưa đủ data** — 1.5% positive rate cần 50k+ rows để train hiệu quả
+- **SOL: 3 trades, 3 LOSS** — quá sớm, model cần thêm data

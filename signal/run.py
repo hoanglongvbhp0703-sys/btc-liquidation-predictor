@@ -7,6 +7,9 @@ Mỗi 10 giây:
   3. Nếu cascade_prob >= SIGNAL_THRESHOLD AND time_to_cascade <= MAX_TTC → ghi paper trade
   4. Check outcome trades cũ
   5. In stats mỗi 1 giờ
+
+Model tự quyết khi nào fire dựa trên prob — không dùng hard liq filter.
+liq_total_1m là feature trong model (rank #3 importance).
 """
 
 import json
@@ -27,7 +30,7 @@ from notifier  import notify_signal
 
 from config import (
     FEATURES_FILE, ML_DIR, DATA_DIR,
-    SIGNAL_THRESHOLD, MIN_ROWS_TRAIN, LIQ_FILTER_USD,
+    SIGNAL_THRESHOLD, MIN_ROWS_TRAIN,
     SIGNAL_COOLDOWN, MAX_TTC,
 )
 
@@ -125,12 +128,6 @@ def run_once(model_ctx: dict | None, cycle: int) -> dict | None:
     current_price = _to_float(feature_row.get("current_price"))
     if current_price is None:
         print("[SIG] current_price không hợp lệ.")
-        return model_ctx
-
-    # Liq filter: bỏ qua nếu tổng thanh lý 1m < ngưỡng (cascade nhỏ không đáng trade)
-    liq_total = _to_float(feature_row.get("liq_total_1m"))
-    if liq_total is not None and liq_total < LIQ_FILTER_USD:
-        print(f"[SIG] Liq filter: liq_total_1m={liq_total:,.0f} < {LIQ_FILTER_USD:,.0f} → skip")
         return model_ctx
 
     try:

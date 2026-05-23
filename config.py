@@ -54,7 +54,6 @@ RUN_INTERVAL_FE  = 60
 # ── Maker order ───────────────────────────────────────────────────
 USE_MAKER        = os.getenv("USE_MAKER", "true").lower() == "true"
 MAKER_OFFSET_PCT = float(os.getenv("MAKER_OFFSET_PCT", "0.00005"))  # 0.005%
-LIQ_FILTER_USD   = float(os.getenv("LIQ_FILTER_USD",   "500000"))   # $500k filter
 
 # ── Signal / trade parameters ─────────────────────────────────────
 CASCADE_TP_PCT   = float(os.getenv("CASCADE_TP_PCT",  "0.0012"))   # 0.12% TP

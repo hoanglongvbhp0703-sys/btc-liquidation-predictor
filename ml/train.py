@@ -160,7 +160,7 @@ def _train_classifier(df_all: pd.DataFrame, label_col: str, direction: str, hori
     print(f"[TRAIN]   AUC ens={auc_test:.4f}  rf={auc_rf:.4f}  lr={auc_lr:.4f}  xgb={auc_xgb:.4f}")
     print(f"[TRAIN]   max_prob={prob_test.max():.3f}  @{SIGNAL_THRESHOLD}: signals={n_signals} prec={prec:.3f} rec={rec:.3f}")
 
-    suffix   = f"cascade_{direction}_{horizon}m"
+    suffix   = f"cascade_{direction}_{horizon}m" if label_col.startswith("cascade") else label_col
     ens_file = SAVED_DIR / f"ens_{suffix}.pkl"
     artifact = {
         "models":      [rf, lr, xgb_model],
@@ -196,8 +196,10 @@ def train():
     df = load_labeled_data()
     print(f"[TRAIN] Total rows: {len(df)}")
 
-    all_metrics = {"long": {}, "short": {}}
+    all_metrics    = {"long": {}, "short": {}}
+    tp_metrics     = {"long": {}, "short": {}}
 
+    # Cascade labels (proxy — liq event xảy ra)
     for direction in ("long", "short"):
         for h in HORIZONS:
             lc = f"cascade_{direction}_{h}m"
@@ -206,7 +208,21 @@ def train():
                 if m:
                     all_metrics[direction][f"{h}m"] = m
             except Exception as e:
-                print(f"[TRAIN-A] {direction}/{h}m lỗi: {e}")
+                print(f"[TRAIN] cascade {direction}/{h}m lỗi: {e}")
+
+    # TP-hit labels (trực tiếp — giá chạm TP trong Xm)
+    tp_cols_exist = any(f"tp_hit_short_{h}m" in df.columns for h in HORIZONS)
+    if tp_cols_exist:
+        print(f"\n[TRAIN] ══ TP-hit labels ══════════════════════════")
+        for direction in ("long", "short"):
+            for h in HORIZONS:
+                lc = f"tp_hit_{direction}_{h}m"
+                try:
+                    m = _train_classifier(df, lc, direction, h)
+                    if m:
+                        tp_metrics[direction][f"{h}m"] = m
+                except Exception as e:
+                    print(f"[TRAIN] tp_hit {direction}/{h}m lỗi: {e}")
 
     trained_a = sum(1 for d in ("long", "short") for v in all_metrics[d].values() if v)
 
@@ -223,6 +239,14 @@ def train():
     ]
     avg_auc = round(sum(aucs) / len(aucs), 4) if aucs else None
 
+    tp_aucs = [
+        v["auc_test"]
+        for d in ("long", "short")
+        for v in tp_metrics[d].values()
+        if v and v.get("auc_test") is not None
+    ]
+    avg_tp_auc = round(sum(tp_aucs) / len(tp_aucs), 4) if tp_aucs else None
+
     meta = {
         "model_type":       "Ensemble_RF+LR+XGB cascade",
         "feature_cols":     FEATURE_COLS,
@@ -230,14 +254,26 @@ def train():
         "trained_at":       pd.Timestamp.now(tz="UTC").isoformat(),
         "avg_auc_test":     avg_auc,
         "horizons":         all_metrics,
-        # backward compat — auc_test dùng bởi auto_train.py
+        "tp_horizons":      tp_metrics,
+        "avg_tp_auc_test":  avg_tp_auc,
         "auc_test":         avg_auc,
     }
 
     with open(SAVED_DIR / "meta.json", "w") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"\n[TRAIN] Models: {trained_a}/6 | avg AUC={avg_auc}")
+    trained_tp = sum(1 for d in ("long", "short") for v in tp_metrics[d].values() if v)
+    print(f"\n[TRAIN] CASCADE models: {trained_a}/6 | avg AUC={avg_auc}")
+    if trained_tp:
+        print(f"[TRAIN] TP-hit  models: {trained_tp}/6 | avg AUC={avg_tp_auc}")
+        print(f"\n[TRAIN] ── So sánh AUC: CASCADE vs TP-hit ──────")
+        for d in ("long", "short"):
+            for h in HORIZONS:
+                k  = f"{h}m"
+                ca = all_metrics[d].get(k, {}).get("auc_test")
+                ta = tp_metrics[d].get(k, {}).get("auc_test")
+                if ca and ta:
+                    print(f"[TRAIN]   {d}_{h}m  cascade={ca:.4f}  tp_hit={ta:.4f}  delta={ta-ca:+.4f}")
     print(f"[TRAIN] meta.json saved → {SAVED_DIR}/meta.json")
 
 
