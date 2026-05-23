@@ -173,6 +173,7 @@ def build_pending_labels() -> int:
 
         labeled_count += 1
 
+    build_tp_labels(df_feat)
     df_feat.to_csv(FEATURES_FILE, index=False)
 
     for direction in ("long", "short"):
@@ -185,55 +186,79 @@ def build_pending_labels() -> int:
             print(f"[LB] {col}: labeled={n}  pos={pos}  base_rate={br:.1%}")
 
     print(f"[LB] Labeled {labeled_count} rows this run | pending (too recent): {skipped}")
-    build_tp_labels(df_feat)
     return labeled_count
 
 
 def build_tp_labels(df_feat: pd.DataFrame | None = None) -> None:
     """
-    Vectorized: tính tp_hit_short_Xm / tp_hit_long_Xm từ current_price.
+    Tính tp_hit_short_Xm / tp_hit_long_Xm từ current_price.
 
     tp_hit_short_Xm = 1 nếu min(close[T+1..T+X]) <= close[T] * (1 - TP_PCT)
     tp_hit_long_Xm  = 1 nếu max(close[T+1..T+X]) >= close[T] * (1 + TP_PCT)
 
-    Dùng close price 1m làm xấp xỉ (bỏ qua intra-minute move).
-    Không cần liq data — chỉ cần features_1m.csv.
+    Chỉ compute rows có NaN label (incremental, không recompute toàn bộ).
+    Khi được gọi với df_feat argument thì không write CSV — caller tự write.
     """
-    if df_feat is None:
+    standalone = df_feat is None
+    if standalone:
         if not FEATURES_FILE.exists():
             return
         df_feat = pd.read_csv(FEATURES_FILE, dtype=str)
 
-    price = pd.to_numeric(df_feat.get("current_price", pd.Series(dtype=float)), errors="coerce")
-    if price.isna().all():
+    price = pd.to_numeric(df_feat.get("current_price", pd.Series(dtype=float)), errors="coerce").values
+    n     = len(df_feat)
+    if np.isnan(price).all():
         return
 
     for h in HORIZONS:
         col_s = f"tp_hit_short_{h}m"
         col_l = f"tp_hit_long_{h}m"
 
-        # min/max close price trong window [T+1 .. T+h]
-        fwd_prices = pd.concat([price.shift(-i) for i in range(1, h + 1)], axis=1)
-        min_fwd = fwd_prices.min(axis=1)
-        max_fwd = fwd_prices.max(axis=1)
+        if col_s not in df_feat.columns:
+            df_feat[col_s] = np.nan
+            df_feat[col_l] = np.nan
 
-        hit_s = ((min_fwd - price) / price <= -CASCADE_TP_PCT).astype(float)
-        hit_l = ((max_fwd - price) / price >=  CASCADE_TP_PCT).astype(float)
+        existing = pd.to_numeric(df_feat[col_s], errors="coerce").values
+        computable_end = n - h  # rows sau đây chưa có đủ future data
 
-        # Cuối file không có future data → NaN
-        hit_s.iloc[-h:] = float("nan")
-        hit_l.iloc[-h:] = float("nan")
+        if computable_end <= 0:
+            continue
 
-        df_feat[col_s] = hit_s.values
-        df_feat[col_l] = hit_l.values
+        # Chỉ compute rows NaN trong vùng có đủ future data
+        needs = np.isnan(existing[:computable_end])
+        if not needs.any():
+            continue
 
-    df_feat.to_csv(FEATURES_FILE, index=False)
+        start = int(np.argmax(needs))  # vị trí NaN đầu tiên
+
+        sub = price[start:computable_end]
+        fwd_min = np.full(len(sub), np.inf)
+        fwd_max = np.full(len(sub), -np.inf)
+        for i in range(1, h + 1):
+            fwd = price[start + i:computable_end + i]
+            fwd_min = np.minimum(fwd_min, fwd)
+            fwd_max = np.maximum(fwd_max, fwd)
+
+        hit_s = ((fwd_min - sub) / sub <= -CASCADE_TP_PCT).astype(float)
+        hit_l = ((fwd_max - sub) / sub >=  CASCADE_TP_PCT).astype(float)
+
+        iloc_s = df_feat.columns.get_loc(col_s)
+        iloc_l = df_feat.columns.get_loc(col_l)
+        df_feat.iloc[start:computable_end, iloc_s] = hit_s
+        df_feat.iloc[start:computable_end, iloc_l] = hit_l
+        # Đảm bảo tail luôn NaN
+        df_feat.iloc[computable_end:, iloc_s] = np.nan
+        df_feat.iloc[computable_end:, iloc_l] = np.nan
+
+    if standalone:
+        df_feat.to_csv(FEATURES_FILE, index=False)
 
     for h in HORIZONS:
         for d, col in [("short", f"tp_hit_short_{h}m"), ("long", f"tp_hit_long_{h}m")]:
             s   = pd.to_numeric(df_feat[col], errors="coerce").dropna()
             pos = (s == 1).sum()
-            print(f"[LB] tp_hit_{d}_{h}m: pos={pos} / {len(s)} = {pos/len(s):.2%}")
+            if len(s):
+                print(f"[LB] tp_hit_{d}_{h}m: pos={pos} / {len(s)} = {pos/len(s):.2%}")
 
 
 def label_summary() -> dict:
