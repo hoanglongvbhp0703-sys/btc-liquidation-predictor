@@ -41,6 +41,7 @@ STATS_EVERY   = 60
 
 _last_model_mtime: float = 0.0
 _last_signal_ts: dict = {"long": 0.0, "short": 0.0}  # cooldown per direction — persisted to disk
+_last_feature_ts: str | None = None
 
 
 def _load_cooldown():
@@ -124,6 +125,13 @@ def run_once(model_ctx: dict | None, cycle: int) -> dict | None:
     feature_row   = load_latest_feature_row()
     if feature_row is None:
         return model_ctx
+
+    global _last_feature_ts
+    row_ts = feature_row.get("timestamp")
+    if row_ts is not None and str(row_ts) == _last_feature_ts:
+        print(f"[SIG] Cùng feature row ({row_ts}) — bỏ qua predict")
+        return model_ctx
+    _last_feature_ts = str(row_ts) if row_ts is not None else None
 
     current_price = _to_float(feature_row.get("current_price"))
     if current_price is None:
