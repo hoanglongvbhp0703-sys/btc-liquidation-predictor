@@ -70,15 +70,38 @@ TP-hit models lưu tại `ml/artifacts/ens_tp_hit_*.pkl`, chưa dùng production
 | | Signals | TP | FP | PENDING | Precision |
 |---|---|---|---|---|---|
 | SHORT | 28 | 12 | 16 | 0 | **42.9%** |
-| LONG  | 22 | 9  | 12 | 1 | **42.9%** |
-| **Total** | **50** | **21** | **28** | **1** | **42.9%** |
+| LONG  | 22 | 9  | 11 | 2 | **45.0%** (n=20) |
+| **Total** | **50** | **21** | **27** | **2** | **~43.8%** |
 
-Validator precision (42.9%) thấp hơn paper_trades SHORT precision (50%) vì validator không có cooldown — bắt nhiều tín hiệu hơn, bao gồm cả false positives từ cùng 1 event.
+Validator precision (~43-45%) thấp hơn paper_trades SHORT precision (50%) vì validator không có cooldown — bắt nhiều tín hiệu hơn, bao gồm cả false positives từ cùng 1 event.
+
+### Phân tích ngày 23/05 — Signals vs Cascades thật
+
+**5 signals bắt được** (validator, không cooldown), **2 TP (40%)**:
+
+| Giờ UTC | Direction | Prob | Outcome | Cascade thật? |
+|---|---|---|---|---|
+| 13:04 | LONG | 0.662 | ✅ TP | Episode 12:52–13:21 (liq_short 590k) |
+| 16:01 | LONG | 0.708 | ❌ FP | Episode 16:00 chỉ 110k (nhỏ) |
+| 20:33 | LONG | **0.895** | ✅ TP | **Đúng giữa 20:10–21:10 (50.9M!)** |
+| 22:25 | SHORT | 0.800 | ❌ FP | Cascade lúc 22:56 — signal sớm 30 phút |
+| 22:31 | SHORT | 0.790 | ❌ FP | Cùng event — validator bắt 2 lần (no cooldown) |
+
+**Cascade thật ngày 23/05** (phân loại theo volume):
+
+| Direction | Episodes đáng kể | Tổng liq |
+|---|---|---|
+| CASCADE LONG (SHORT bị liq → giá tăng) | 07:46–07:51 **47.7M**, 00:32–00:41 9.2M, +8 nhỏ | ~58M |
+| CASCADE SHORT (LONG bị liq → giá giảm) | **20:10–21:10 50.9M**, 18:07 1.7M, 14:07 1.7M, +5 vừa/nhỏ | ~57M |
+
+Model bắt đúng 2/3 cascade LONG lớn trong ngày (bỏ qua 1 episode nhỏ lúc 16:00). SHORT hoàn toàn miss — signal lúc 22:25/22:31 sớm hơn 30 phút so với cascade thật.
+
+**Nhận xét:** 2 FP SHORT cách nhau 6 phút lúc 22:25/22:31 là 1 event thật ra — validator không có cooldown bắt 2 lần. Paper trader chỉ bắt 1 lần do cooldown 15min.
 
 ### Sau khi bỏ liq filter (23/05 10:00 → 24/05 05:35, ~19h)
 - paper_trades: 7 trades mới (1 SHORT + 6 LONG)
 - signal_outcomes: 6 signals mới — thấp hơn kỳ vọng vì thị trường đang **sideways, liq_total_1m ≈ 0.0**
-- Chưa thể đánh giá hiệu quả của việc bỏ filter — cần đợi có cascade event
+- Ngày 23/05 có cascade lớn (50.9M SHORT lúc 20:10–21:10) — model bắt được 1 signal đúng lúc 20:33
 
 ---
 
