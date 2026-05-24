@@ -16,6 +16,7 @@ import json
 import pickle
 import sys
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -225,15 +226,19 @@ def predict_all(
     if max_ttc is None:
         max_ttc = MAX_TTC
 
-    out: dict = {}
-    for direction in ("long", "short"):
+    def _predict_direction(direction: str) -> tuple:
         curve = predict_cascade_curve(ctx, feature_row, direction)
         probs = [p for p in curve.values() if p is not None]
         prob  = round(max(probs), 4) if probs else None
         ttc   = _ttc_from_curve(curve)
-        out[f"prob_{direction}"]  = prob
-        out[f"curve_{direction}"] = curve
-        out[f"ttc_{direction}"]   = ttc
+        return direction, curve, prob, ttc
+
+    out: dict = {}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        for direction, curve, prob, ttc in executor.map(_predict_direction, ("long", "short")):
+            out[f"prob_{direction}"]  = prob
+            out[f"curve_{direction}"] = curve
+            out[f"ttc_{direction}"]   = ttc
 
     signal    = None
     threshold = ctx.get("threshold", 0.70)

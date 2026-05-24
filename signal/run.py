@@ -198,9 +198,11 @@ def main():
     model_ctx = run_once(model_ctx, cycle)
 
     while True:
-        time.sleep(RUN_INTERVAL)
+        t_start   = time.monotonic()
         cycle    += 1
         model_ctx = run_once(model_ctx, cycle)
+        elapsed   = time.monotonic() - t_start
+        time.sleep(max(0.0, RUN_INTERVAL - elapsed))
 
 
 if __name__ == "__main__":
