@@ -3,84 +3,82 @@
 ## Tổng quan dự án
 
 Hệ thống dự đoán cascade liquidation BTC Futures (Binance) để tìm cơ hội trade.
-- **Model:** Ensemble RF+LR+XGB (3 horizons: 1m/2m/3m) × 2 directions (LONG/SHORT) = 6 artifacts + 6 TP-hit artifacts
-- **Data:** 14,740 rows (2026-05-09 → 2026-05-23, 14 ngày), 1 market regime
+- **Model:** Ensemble RF+LR+XGB (3 horizons: 1m/2m/3m) × 2 directions (LONG/SHORT) = 6 CASCADE artifacts + 6 TP-hit artifacts
+- **Data:** 15,116 rows (2026-05-14 → 2026-05-24, ~10 ngày), 1 market regime (sideways/downtrend)
 - **Pipeline:** 7 services BTC + 4 services SOL chạy 24/7
 
 ---
 
-## Trạng thái hệ thống (23/05/2026 ~10:35 UTC)
+## Trạng thái hệ thống (24/05/2026 ~05:35 UTC)
 
 ```
 tmux session 'btc':
-  signal    (win 0)  ✅ Predict mỗi 10s — KHÔNG còn liq filter, model tự quyết
+  signal    (win 0)  ✅ Predict mỗi 10s — liq filter ĐÃ XOÁ, model tự quyết
   collector (win 1)  ✅ 7 streams Binance (WS + REST)
-  features  (win 2)  ✅ Feature engineering mỗi 1 phút, 14,740 rows
+  features  (win 2)  ✅ Feature engineering mỗi 1 phút, 15,116 rows
   server    (win 3)  ✅ Dashboard http://localhost:8000
-  auto_train(win 4)  ✅ Retrain mỗi 60 phút, avg AUC=0.700
-  monitor   (win 5)  ✅ Running (stat lịch sử: precision=90.8%, recall=43.5%)
-  validator (win 6)  ⚠️ Running nhưng frozen ở data 18/05 — không track trades mới
+  auto_train(win 4)  ✅ Retrain mỗi 60 phút, avg AUC=0.7045
+  monitor   (win 5)  ✅ Running
+  validator (win 6)  ✅ Running (fixed: dùng ensemble đầy đủ RF+LR+XGB)
 
-tmux session 'sol':  ✅ SOL pipeline (4 windows, 5,213 rows, AUC=0.667)
+tmux session 'sol':  ✅ SOL pipeline (4 windows)
 ```
 
 ---
 
-## Model hiện tại (retrain 23/05 ~10:34 UTC, 14,740 rows)
+## Model hiện tại (retrain 24/05 ~05:06 UTC, 15,116 rows)
 
-| Target | CASCADE AUC | TP-hit AUC | CASCADE prec@0.65 |
-|---|---|---|---|
-| short_1m | **0.758** | 0.660 | 50% (n=22) |
-| short_2m | **0.704** | 0.631 | 52% (n=27) |
-| short_3m | 0.674 | 0.617 | 48% (n=27) |
-| long_1m  | **0.770** | 0.738 | 50% (n=16) |
-| long_2m  | 0.652 | 0.652 | 44% (n=16) |
-| long_3m  | 0.644 | 0.624 | 43% (n=7)  |
-| **Avg**  | **0.700** | 0.654 | — |
+| Target | CASCADE AUC | TP-hit AUC |
+|---|---|---|
+| short_1m | **0.7617** | 0.6919 |
+| short_2m | **0.7055** | 0.6426 |
+| short_3m | 0.6626 | 0.6251 |
+| long_1m  | **0.7735** | 0.7165 |
+| long_2m  | 0.6778 | 0.6537 |
+| long_3m  | 0.646  | 0.625  |
+| **Avg**  | **0.7045** | **0.6591** |
 
-AUC vừa vượt ngưỡng 0.70 lần đầu (0.696 → 0.698 → 0.700).
-TP-hit model AUC thấp hơn CASCADE vì positive class hiếm hơn (1.5–3.8% vs 6.7%) và 14k rows chưa đủ.
+AUC avg tăng nhẹ từ 0.700 → 0.7045 sau thêm ~350 rows mới.
+TP-hit models lưu tại `ml/artifacts/ens_tp_hit_*.pkl`, chưa dùng production (cần 50k+ rows).
 
 ---
 
 ## Config hiện tại (single source of truth: config.py)
 
-| Parameter | Giá trị | Override |
+| Parameter | Giá trị | Ghi chú |
 |---|---|---|
 | `SIGNAL_THRESHOLD` | **0.65** | env var |
 | `CASCADE_TP_PCT` | **0.120%** | env var |
 | `CASCADE_SL_PCT` | **0.120%** | env var |
 | `SIGNAL_COOLDOWN` | **900s (15min)** | env var |
 | `MAX_TTC` | **2.0m** | env var |
-| ~~`LIQ_FILTER_USD`~~ | ~~$500,000~~ | **ĐÃ XOÁ 23/05** |
 | `USE_MAKER` | **true** | env var |
 | `MAKER_OFFSET_PCT` | **0.005%** | env var |
+| ~~`LIQ_FILTER_USD`~~ | ~~$500,000~~ | **XOÁ ngày 23/05** |
 
 ---
 
-## Paper Trading (23/05/2026 ~10:35 UTC)
+## Paper Trading (24/05/2026 ~05:35 UTC)
 
 | | n | WIN | LOSS | EXPIRED | UNFILLED | Precision (resolved) | PnL |
 |---|---|---|---|---|---|---|---|
-| LONG  | 91 | 5 | 65 | 21 | 0 | **7%** (n=70) | **-24.88%** |
-| SHORT | 36 | 3 | 3  | 28 | 2 | **50%** (n=6) | **-0.01%** |
-| **Tổng** | **127** | **8** | **68** | **49** | **2** | — | **-24.89%** |
+| LONG  | 97 | 5  | 68 | 24 | 0 | **7%** (n=73) | **-25.23%** |
+| SHORT | 37 | 3  | 3  | 29 | 2 | **50%** (n=6) | **-0.03%** |
+| **Tổng** | **134** | **8** | **71** | **53** | **2** | — | **-25.26%** |
 
-**Phân tích SHORT — pattern 3 LOSS liên tiếp (22–23/05):**
-- 3 WIN đều ngày 18/05, prob 0.62–0.82
-- 3 LOSS: 22/05 18:46 (prob=0.856, liq=$8M), 22/05 19:31 (prob=0.781, liq=$11.5M), 23/05 07:51 (prob=0.716)
-- Pattern: liq LONG cascade lớn → giá drop → model fire SHORT → **dead cat bounce** → hit SL
-- Precision giảm 100% (n=3) → 50% (n=6) — cần thêm n để kết luận
+### Signal Validator (ensemble fix, 24/05)
+| | Signals | TP | FP | PENDING | Precision |
+|---|---|---|---|---|---|
+| SHORT | 28 | 12 | 16 | 0 | **42.9%** |
+| LONG  | 22 | 9  | 12 | 1 | **42.9%** |
+| **Total** | **50** | **21** | **28** | **1** | **42.9%** |
 
-**Phân tích recall hệ thống (phát hiện ngày 23/05):**
-- Tổng cascade SHORT trong 14 ngày: **987 events**
-- Hệ thống bắt được: **36 trades = 3.6% recall** (do liq filter cũ chặn 97.5%)
-- Sau khi bỏ liq filter: kỳ vọng tăng lên ~40–52 signal/ngày
+Validator precision (42.9%) thấp hơn paper_trades SHORT precision (50%) vì validator không có cooldown — bắt nhiều tín hiệu hơn, bao gồm cả false positives từ cùng 1 event.
 
-**Precision trên CASCADE label (out-of-sample test set):**
-- Với liq filter (cũ): 75.2% — nhưng chỉ 8 signal/ngày
-- Không có liq filter: 44.4% (out-of-sample) — nhưng 52 signal/ngày
-- Monitor (90.8%) là in-sample và không có liq filter → không so sánh trực tiếp được
+### Sau khi bỏ liq filter (23/05 10:00 → 24/05 05:35, ~19h)
+- paper_trades: 7 trades mới (1 SHORT + 6 LONG)
+- signal_outcomes: 6 signals mới — thấp hơn kỳ vọng vì thị trường đang **sideways, liq_total_1m ≈ 0.0**
+- Chưa thể đánh giá hiệu quả của việc bỏ filter — cần đợi có cascade event
 
 ---
 
@@ -89,7 +87,6 @@ TP-hit model AUC thấp hơn CASCADE vì positive class hiếm hơn (1.5–3.8% 
 ---
 
 ### 1–11. Các thay đổi từ session 20–22/05 ✅
-
 *(Giữ nguyên — xem commit `a5176074`)*
 
 ---
@@ -99,118 +96,125 @@ TP-hit model AUC thấp hơn CASCADE vì positive class hiếm hơn (1.5–3.8% 
 **Phát hiện:**
 - `liq_total_1m` là feature **#3 quan trọng nhất** trong RF (importance=0.062)
 - Model đã tự học liq → hard filter bên ngoài là redundant và có hại
-- Liq filter làm precision giảm: 86.5% (no filter) → 75.2% (có filter), với ít signal hơn 6×
-
-| Phương án | Signal/ngày | Precision (cascade label, out-of-sample) |
-|---|---|---|
-| Liq>=500k + prob>=0.65 (cũ) | ~8 | 75.2% |
-| Prob>=0.65 only (mới) | ~52 | 86.5% (in-sample) / 44.4% (out-of-sample) |
-| Prob>=0.70 only | ~41 | 92.3% (in-sample) |
 
 ---
 
-### 13. Xoá LIQ_FILTER_USD ✅ (23/05)
+### 13. Xoá LIQ_FILTER_USD ✅ (23/05, commit `79375a16`)
 
-**Thay đổi:**
 - `config.py`: Xoá constant `LIQ_FILTER_USD`
-- `signal/run.py`: Xoá import + block liq filter (4 dòng) + cập nhật docstring
-- Restart cả BTC (btc:0) và SOL (sol:2) signal services
-
-**Kết quả:** Signal không còn bị block bởi liq filter. Model tự quyết dựa vào prob >= 0.65.
-Kỳ vọng đủ n=50 resolved SHORT trong 1–2 tuần thay vì vài tháng.
+- `signal/run.py`: Xoá import + block liq filter + cập nhật docstring
 
 ---
 
-### 14. Thêm TP-hit labels + train models ✅ (23/05)
+### 14. Thêm TP-hit labels + train models ✅ (23/05, commit `79375a16`)
 
-**Motivation:** CASCADE label đo "liq event xảy ra" (proxy), TP-hit label đo "giá chạm TP 0.12% trong Xm" (thực tế hơn).
+- `feature_engine/label_builder.py`: thêm `build_tp_labels()` vectorized
+- `ml/train.py`: train thêm 6 TP-hit models, in so sánh CASCADE vs TP-hit AUC
 
-**Thay đổi code:**
-- `feature_engine/label_builder.py`:
-  - Thêm `build_tp_labels()` — vectorized, tính `tp_hit_short_Xm` / `tp_hit_long_Xm` từ `current_price`
-  - Gọi từ `build_pending_labels()` sau mỗi lần label cascade
-- `ml/train.py`:
-  - Train thêm 6 TP-hit models nếu columns tồn tại
-  - In so sánh CASCADE vs TP-hit AUC
-  - Lưu `avg_tp_auc_test` vào meta.json
+**Kết quả:** TP-hit AUC thấp hơn CASCADE (0.659 vs 0.704). Lý do: positive rate 1.5–3.8%, cần 50k+ rows.
 
-**Kết quả:** TP-hit models AUC thấp hơn CASCADE (0.654 vs 0.700). Nguyên nhân:
-- Positive class quá hiếm: tp_hit_short_1m chỉ 1.52%, tp_hit_short_2m chỉ 3.78%
-- Close price 1m là xấp xỉ thô — bỏ qua intra-minute move → false negatives
-- 14k rows chưa đủ để học pattern này
+---
 
-**Quyết định:** Giữ CASCADE models cho production. TP-hit models lưu sẵn tại `ml/artifacts/ens_tp_hit_*.pkl` để dùng lại khi đủ 50k+ rows.
+### 15. Fix double write trong label_builder.py ✅ (23/05, commit `d85bb4fe`)
 
-**⚠️ Bugs chưa fix trong code mới này — cần làm tiếp:**
-- `build_tp_labels()` recompute ALL 14k rows mỗi phút → tốn CPU không cần thiết
-- `build_pending_labels()` ghi CSV 2 lần/phút (1 lần cascade, 1 lần TP) → double write
-- Nên: chỉ compute TP labels cho các rows mới (chưa có label), ghi 1 lần duy nhất
+**Bug:** `build_pending_labels()` ghi CSV 2 lần/phút (cascade + TP).
+
+**Fix:**
+- Gọi `build_tp_labels(df_feat)` TRƯỚC `df_feat.to_csv()`
+- `build_tp_labels()` chỉ write CSV khi `standalone=True` (gọi không có argument)
+
+---
+
+### 16. Fix recompute toàn bộ trong build_tp_labels() ✅ (23/05, commit `d85bb4fe`)
+
+**Bug:** `build_tp_labels()` recompute cả 14k rows mỗi phút.
+
+**Fix:**
+- Dùng `np.argmax(np.isnan(existing))` để tìm row NaN đầu tiên
+- Chỉ compute `[start:computable_end]` — O(new_rows) thay vì O(all_rows)
+- Numpy-based forward min/max thay vì `pd.concat+shift`
+
+**Test:** 100x no-op = 0.155s (so với O(14k) ≈ vài giây mỗi phút).
+
+---
+
+### 17. Fix signal_validator dùng RF thay vì ensemble ✅ (23/05, commit `4dcc213a`)
+
+**Bug:** Validator dùng chỉ `art["models"][0]` (RF), không phải ensemble.
+
+**Fix:** Thêm `_ensemble_prob()` — average prob RF+LR+XGB với scaler cho LR.
+
+**Kết quả:** LONG prob tăng từ 0.178 → 0.329, consistent với paper trader.
+
+---
+
+### 18. Setup PreCompact hook ✅ (24/05)
+
+**File:** `~/.claude/settings.json` + `~/.claude/precompact_summary.py`
+
+**Chức năng:** Trước khi Claude Code auto-compact context:
+1. Script đọc git state, model state, paper trading stats
+2. Ghi checkpoint vào `~/.claude/projects/-home-coder/memory/project_btc_pipeline.md`
+3. Output `additionalContext` JSON → Claude dùng để viết compact summary chính xác
+
+**Note:** Không có "stop at 70% context" trong Claude Code. `autoCompactEnabled=true` compact khi context **gần đầy** (~95%). Không cấu hình được % cụ thể.
 
 ---
 
 ## Git commits
 
 ```
+4dcc213a  fix: signal_validator dùng ensemble đầy đủ thay vì chỉ RF
+d85bb4fe  fix: label_builder double write + recompute-all bugs
+79375a16  feat: remove liq filter, add TP-hit labels, train TP-hit models (23/05/2026)
 a5176074  fix: timestamp parsing, CVD chart history, test suite, performance (22/05/2026)
 2b21aca8  docs: update SESSION_SUMMARY.md to 21/05/2026; fix paper_trades.csv schema
-ff9c7005  docs: update SESSION_SUMMARY.md to 20/05/2026
-7565ca10  fix: correct UI bugs — hardcoded TP/SL labels, CVD chart, SYMBOL filter, ML_DIR
-1a74ad6d  refactor: eliminate hardcodes and unused files, add SOL pipeline
-5db45f65  feat: switch production model to Ensemble RF+LR+XGB
 ```
 
-*(Chưa commit thay đổi ngày 23/05)*
+*(Push lên cả origin (git.nsts.com.vn) và github (github.com/hoanglongvbhp0703-sys/btc-liquidation-predictor))*
 
 ---
 
 ## Điều kiện để live trade BTC (chưa đạt)
 
-1. ❌ Precision ≥ 75% sustained — SHORT 50% (n=6); LONG thực tế 7% (n=70)
-2. ❌ 50+ resolved SHORT signals — hiện 6 resolved
-3. ❌ 30+ ngày data, nhiều market regime — hiện 14 ngày, 1 regime (sideways/downtrend)
+1. ❌ Precision ≥ 75% sustained — SHORT paper_trades 50% (n=6); validator 42.9% (n=28)
+2. ❌ 50+ resolved SHORT signals — paper_trades chỉ 6 resolved; validator 28 resolved
+3. ❌ 30+ ngày data, nhiều market regime — hiện ~10 ngày, 1 regime (sideways/downtrend)
 
-**Khuyến nghị:** Không trade LONG. Theo dõi SHORT khi đủ n=30+ resolved.
-Sau khi bỏ liq filter, kỳ vọng đủ n=50 trong 1–2 tuần.
+**Khuyến nghị:** Không trade LONG. SHORT có thể xem xét khi validator đạt n=50+ resolved và precision ≥ 60%.
 
 ---
 
 ## Việc cần làm
 
-### 🔴 Cần làm ngay (bugs code mới)
+### 🟡 Normal priority (đang tự chạy)
 
-1. **Fix double write trong label_builder.py** — `build_pending_labels()` đang ghi CSV 2 lần/phút:
-   - Gọi `build_tp_labels(df_feat)` TRƯỚC `df_feat.to_csv()`, không phải sau
-   - `build_tp_labels()` không nên ghi CSV khi được gọi với df_feat argument (chỉ update in-memory)
-
-2. **Fix recompute toàn bộ trong build_tp_labels()** — chỉ tính cho rows chưa có TP label:
-   - Kiểm tra `df_feat[col_s].isna()` → chỉ compute rows NaN
-   - Hoặc: chỉ compute 10 rows cuối (rows mới + rows vừa có đủ future data)
-
-### 🟡 Normal priority
-
-3. **[ĐANG CHẠY]** Tích lũy resolved paper trades — mục tiêu n=50 SHORT resolved
-4. Đánh giá lại SHORT precision khi đủ n=30 resolved
-5. Fix validator (btc:6) — hiện frozen ở data 18/05, không track trades mới
-6. Xem xét raise SIGNAL_THRESHOLD lên 0.70 nếu SHORT precision tiếp tục ≤ 50%
-7. Khi đủ điều kiện: thêm Binance API execution (~50 dòng code)
+1. **[AUTO]** Tích lũy resolved SHORT trades:
+   - paper_trades target: n=50 resolved (hiện n=6) — ước tính vài tuần
+   - validator target: n=50 resolved (hiện n=28) — ước tính vài ngày
+2. Đánh giá lại SHORT precision khi validator đạt n=50 resolved
+3. Xem xét raise `SIGNAL_THRESHOLD` lên 0.70 nếu SHORT precision tiếp tục ≤ 50%
+4. Đánh giá hiệu quả bỏ liq filter khi có đủ data (cần cascade event)
 
 ### 🔵 Cải thiện dài hạn
 
-8. Khi đủ 50k+ rows: retrain TP-hit models với klines_1s (chính xác hơn close price 1m)
-9. Bull market data sẽ cải thiện LONG AUC — chờ regime thay đổi
-10. SOL cần thêm ~10k rows trước khi model có ý nghĩa (hiện 5,213 rows)
-11. Optuna hyperparameter tuning khi data > 50k rows
-12. Walk-forward backtest trước khi scale vốn
+5. Khi đủ 50k+ rows: retrain TP-hit models với klines_1s (chính xác hơn close price 1m)
+6. Bull market data sẽ cải thiện LONG AUC — chờ regime thay đổi
+7. SOL pipeline cần thêm ~10k rows trước khi model có ý nghĩa
+8. Optuna hyperparameter tuning khi data > 50k rows
+9. Walk-forward backtest trước khi scale vốn
+10. Thêm Binance API execution (~50 dòng code) khi đủ điều kiện live trade
 
 ---
 
 ## Giới hạn thực tế
 
-- **14 ngày data, 1 market regime** (sideways/downtrend) — chưa thấy bull/high-vol
-- **SHORT n=6 resolved, 3 WIN / 3 LOSS** — CI quá rộng, 50% không có ý nghĩa thống kê
-- **Dead cat bounce** sau liq cascade lớn — 3 LOSS liên tiếp 22–23/05, đều prob cao (0.72–0.86)
-- **LONG precision thực 7%** — 5 wins là artifact feature staleness, không phải tín hiệu thật
-- **Recall cực thấp** — hệ thống (cũ) chỉ bắt 3.6% cascade thực sự do liq filter
+- **~10 ngày data, 1 market regime** (sideways/downtrend) — chưa thấy bull/high-vol
+- **SHORT paper_trades n=6 resolved, 3WIN/3LOSS** — CI quá rộng, 50% không có ý nghĩa thống kê
+- **Validator SHORT n=28 resolved, precision=42.9%** — có ý nghĩa hơn nhưng vẫn dưới mục tiêu 75%
+- **Dead cat bounce** sau liq cascade lớn — 3 LOSS liên tiếp 22-23/05
+- **LONG precision thực 7%** — không viable, không trade
+- **Sau bỏ liq filter: chưa thấy tăng tín hiệu** — thị trường sideways, liq ≈ 0; cần cascade event
 - **Cascade BTC median 0.029% < taker fee 0.10%** — chỉ viable với maker orders
-- **TP-hit label chưa đủ data** — 1.5% positive rate cần 50k+ rows để train hiệu quả
+- **TP-hit label chưa đủ data** — 1.5% positive rate cần 50k+ rows
 - **SOL: 3 trades, 3 LOSS** — quá sớm, model cần thêm data
