@@ -79,7 +79,7 @@ def _clear():
     print("\033[H\033[2J", end="", flush=True)
 
 
-def _display(events: list, meta: dict, n_seen: int, model_reloads: int):
+def _display(events: list, meta: dict, n_seen: int, model_reloads: int, live_since: "pd.Timestamp | None" = None):
     _clear()
     trained_at = meta.get("trained_at", "N/A")[:19]
     avg_auc    = meta.get("avg_auc_test", "N/A")
@@ -88,7 +88,8 @@ def _display(events: list, meta: dict, n_seen: int, model_reloads: int):
 
     print("═" * _W)
     print(f"  SHORT Signal Monitor  │  {mtype}  │  Trained: {trained_at}  │  AUC: {avg_auc}")
-    print(f"  Threshold: {THRESHOLD}  │  Rows processed: {n_seen}  │  Model reloads: {model_reloads}  │  {now_str}")
+    live_str = live_since.strftime("%Y-%m-%d %H:%M") if live_since else "?"
+    print(f"  Threshold: {THRESHOLD}  │  Live since: {live_str}  │  Rows processed: {n_seen}  │  {now_str}")
     print("═" * _W)
 
     if not events:
@@ -142,10 +143,11 @@ def _print_stats(events: list):
 def main():
     models, meta, model_mtime = _load_models()
     model_reloads = 0
-    seen_ts = set()
-    events  = []
+    seen_ts   = set()
+    events    = []
+    live_since = pd.Timestamp.now(tz="UTC")
 
-    print("Đang load models và đọc data lịch sử...", flush=True)
+    print(f"Đang load models và đọc data lịch sử... (live từ {live_since.strftime('%H:%M')} UTC)", flush=True)
 
     while True:
         try:
@@ -199,14 +201,15 @@ def main():
                     elif signal and not any_actual: result = "FP"
                     else:                         result = "FN"
 
-                    events.append({
-                        "ts": row["timestamp"], "p1": p1, "p2": p2, "p3": p3,
-                        "signal": signal, "a1": a1, "a2": a2, "a3": a3,
-                        "result": result,
-                    })
+                    if row["timestamp"] >= live_since:
+                        events.append({
+                            "ts": row["timestamp"], "p1": p1, "p2": p2, "p3": p3,
+                            "signal": signal, "a1": a1, "a2": a2, "a3": a3,
+                            "result": result,
+                        })
 
             events.sort(key=lambda e: e["ts"])
-            _display(events, meta, len(seen_ts), model_reloads)
+            _display(events, meta, len(seen_ts), model_reloads, live_since)
 
         except KeyboardInterrupt:
             print("\n\n  Monitor dừng.")

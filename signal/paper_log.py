@@ -126,7 +126,7 @@ def check_outcomes() -> int:
                 if is_long and r["low"] <= entry:
                     filled, fill_time = True, r["open_time"]
                     break
-                if not is_long and r["high"] >= entry:
+                if not is_long and r["low"] <= entry:
                     filled, fill_time = True, r["open_time"]
                     break
 

@@ -190,7 +190,7 @@ def _build_signal_dict(
         sl    = round(entry * (1 - CASCADE_SL_PCT), 2)
         sig   = "CASCADE_LONG"
     else:
-        entry = round(current_price * (1 + MAKER_OFFSET_PCT), 2) if USE_MAKER else round(current_price, 2)
+        entry = round(current_price * (1 - MAKER_OFFSET_PCT), 2) if USE_MAKER else round(current_price, 2)
         tp    = round(entry * (1 - CASCADE_TP_PCT), 2)
         sl    = round(entry * (1 + CASCADE_SL_PCT), 2)
         sig   = "CASCADE_SHORT"
