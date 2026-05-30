@@ -1,342 +1,265 @@
 # BTC Cascade Liquidation Predictor
 
-> Hệ thống ML real-time dự đoán BTC có xảy ra cascade liquidation trong 1–3 phút tới không,
-> từ đó tạo tín hiệu giao dịch theo chiều cascade.
-
-[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org)
-[![Model](https://img.shields.io/badge/model-RandomForest-orange.svg)](https://scikit-learn.org)
-[![Django](https://img.shields.io/badge/backend-Django%20Channels-092E20.svg)](https://channels.readthedocs.io)
-[![License](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
+A machine learning system that predicts **cascade liquidation events** in BTC Futures (Binance USDS-M) to identify short-term trading opportunities.
 
 ---
 
-## Cascade Liquidation là gì?
+## Core Idea
 
-**SHORT cascade** = hàng loạt lệnh LONG bị forced-liquidation → giá giảm mạnh đột ngột
-**LONG cascade** = hàng loạt lệnh SHORT bị forced-liquidation → giá tăng mạnh đột ngột
+When many futures positions are force-liquidated simultaneously (a "cascade"), BTC price moves sharply in one direction within 1–3 minutes. This system predicts the probability of a cascade occurring in the next 1–3 minutes and fires a paper trade signal when confidence is high enough.
 
-Khi model dự đoán SHORT cascade → trader vào lệnh **SHORT** để ăn theo đà giảm.
-Khi model dự đoán LONG cascade → trader vào lệnh **LONG** để ăn theo đà tăng.
+**Key constraint:** Cascade median move (~0.029%) is smaller than taker fee (0.10%), so only **maker orders** are viable.
 
 ---
 
-## Tổng quan hệ thống
+## System Architecture — 5 Layers
 
 ```
-Binance Futures WebSocket / REST  (8 streams real-time)
-            │
-            ▼
-┌───────────────────┐
-│   collector/      │  Layer 1 — stream data → data/*.csv
-└────────┬──────────┘
-         │
-         ▼
-┌───────────────────┐
-│  feature_engine/  │  Layer 2+3 — 44 features + labels mỗi 1 phút
-└────────┬──────────┘
-         │  data/features_1m.csv
-         ▼
-┌───────────────────┐
-│      ml/          │  Layer 4 — RandomForest, 6 models (SHORT/LONG × 1/2/3m)
-│  auto_train.py    │            auto-retrain mỗi 1 giờ
-└────────┬──────────┘
-         │  ml/artifacts/*.pkl
-         ▼
-┌───────────────────┐
-│    signal/        │  Layer 5 — inference mỗi 1 phút + paper trading
-└────────┬──────────┘
-         │
-         ▼
-┌───────────────────┐
-│    server/        │  Layer 6 — Django + WebSocket dashboard real-time
-└───────────────────┘
-         │
-         ▼
-┌───────────────────┐
-│    scripts/       │  Tools — signal_validator (24/7 TP/FP tracker),
-│                   │          live_predict, benchmark_models
-└───────────────────┘
+Layer 1   collector/main.py            7 Binance streams → raw CSVs
+Layer 2   feature_engine/run.py        Build 38 features every 1 min → features_1m.csv
+Layer 3   feature_engine/label_builder.py   Label cascade events (3 horizons × 2 directions)
+Layer 4   ml/train.py + auto_train.py  Ensemble RF+LR+XGB, auto-retrain every 60 min
+Layer 5   signal/run.py                Predict every 10s (deduped to 1×/min), fire paper trade
 ```
 
----
+### Live Services (tmux session `btc`)
 
-## Kết quả hiện tại
-
-> **Dataset:** 7,286 rows · 5.9 ngày thật từ Binance (09–15/05/2026) · BTC $79K–$82K
-> **Train/Test split:** 80/20 theo thời gian (5,778 train / 1,445 test)
-> **Auto-retrain:** mỗi 1 giờ — model luôn cập nhật data mới nhất
-
-### AUC-ROC — out-of-sample (test set, 20% cuối)
-
-| Direction | 1m | 2m | 3m | Avg |
-|---|---|---|---|---|
-| **SHORT** | **0.804** | **0.781** | **0.749** | **0.778** |
-| LONG | 0.747 | 0.682 | 0.670 | 0.700 |
-| **Overall avg** | | | | **0.739** |
-
-> SHORT 1m AUC=0.804 — benchmark xuất sắc cho financial ML ngắn hạn.
-> LONG yếu hơn (~0.70 avg) — cần thêm data từ nhiều market regime.
-
-### Precision / Recall — test set tại threshold=0.60
-
-| Model | Signals | Precision | Recall | AUC |
-|---|---|---|---|---|
-| SHORT 1m | 4 | 100% | 3.3% | 0.804 |
-| SHORT 2m | 12 | 66.7% | 5.3% | 0.781 |
-| SHORT 3m | 9 | 66.7% | 3.5% | 0.749 |
-| LONG 1m | 1 | 100% | 1.0% | 0.747 |
-| LONG 2m | 0 | — | — | 0.682 |
-| LONG 3m | 0 | — | — | 0.670 |
-
-> Recall thấp là có chủ đích: threshold=0.60 chỉ bắn signal khi model rất tự tin.
-> Đổi lại precision cao (66–100%) — khi signal bắn thì đa phần đúng.
-
-### Base rate & Lift
-
-| | Base rate | Model precision | Lift |
-|---|---|---|---|
-| SHORT cascade | 7.5% | ~60–100% | **~7–13x** |
-| LONG cascade | 7.3% | ~33% (live) | ~4x |
-
-> "Lift" = model tốt hơn random bao nhiêu lần. 7x là edge thật.
-
-### Model Benchmark — so sánh 5 thuật toán (avg AUC qua 6 targets)
-
-| Rank | Model | Avg AUC | Train time/model |
-|---|---|---|---|
-| **#1** | **RandomForest** | **0.709** | ~1s |
-| #2 | ExtraTrees | 0.685 | ~1s |
-| #3 | CatBoost | 0.669 | ~2s |
-| #4 | LightGBM | 0.662 | ~110s ⚠️ |
-| #5 | XGBoost | 0.635 | ~55s |
-
-> RandomForest thắng toàn diện + train nhanh nhất → phù hợp cho auto-retrain mỗi 1h.
+| Window | Script | Role | Interval |
+|--------|--------|------|----------|
+| 0 | `signal/run.py` | Predict + paper trade | 10s poll, 1 predict/min |
+| 1 | `collector/main.py` | 7 Binance WS/REST streams | real-time |
+| 2 | `feature_engine/run.py` | Features + labels | 1 min |
+| 3 | `server/manage.py` | Django dashboard | http://localhost:8000 |
+| 4 | `ml/auto_train.py` | Auto retrain | 60 min |
+| 5 | `scripts/monitor_short.py` | Live SHORT signal monitor | 60s refresh |
+| 6 | `scripts/signal_validator.py` | Signal validator (no cooldown) | 10s |
 
 ---
 
-## Live Performance (đang theo dõi)
+## How to Run
 
-### Signal Validator — 32 giờ đầu (14–15/05/2026)
-
-| Direction | Signals | TP | FP | Precision |
-|---|---|---|---|---|
-| **SHORT** | 5 | 3 | 2 | **60%** |
-| LONG | 3 | 0 | 2 | 0%* |
-| Overall | 8 | 3 | 4 | 43% |
-
-> *LONG chỉ có 3 signals, 1 PENDING — chưa đủ data để đánh giá.
-> SHORT 60% precision = 7x tốt hơn random (base rate 7.5%).
-
-### Cascade events thực tế vs Signal bắt được (32 giờ)
-
-| | Cascade xảy ra | Model bắt được | Recall |
-|---|---|---|---|
-| SHORT | 69 events | 5 | 7% |
-| LONG | 63 events | 3 | 5% |
-
-> Recall thấp là đánh đổi có chủ đích — xem phần Trade-off bên dưới.
-
-### Paper Trading (10 trades, 13–15/05/2026)
-
-| Trades | WIN | LOSS | EXPIRED | Total PnL |
-|---|---|---|---|---|
-| 10 | 0 | 0 | 10 | -0.02% |
-
-> **Tất cả EXPIRED** = giá không chạm TP (+0.8%) cũng không chạm SL (-0.5%) trong 3 phút.
-> TP=0.8% đang đặt quá rộng so với biên độ cascade thực tế — cần calibrate.
-
----
-
-## Trade-off: Precision vs Recall
-
-Hệ thống thiết kế để **trade theo cascade**, không phải phòng thủ tránh cascade:
-
-| Threshold | Precision SHORT | Recall SHORT | Phù hợp cho |
-|---|---|---|---|
-| 0.50 | ~45% | ~25% | Cảnh báo sớm / phòng thủ |
-| **0.60** ← hiện tại | **~60%** | **~7%** | **Trading — EV dương** |
-| 0.70 | ~70%+ | ~2% | Cực kỳ chọn lọc |
-
-**Expected Value tại threshold=0.60** (TP=0.8%, SL=0.5%):
-
-```
-EV = (60% × +0.8%) + (40% × -0.5%) = +0.48% − 0.20% = +0.28% / lệnh
-```
-
-> EV dương — có edge thật. Nhưng cần calibrate TP/SL trước khi trade thật.
-
----
-
-## Giới hạn & Lộ trình
-
-### Giới hạn hiện tại
-
-- **Sample nhỏ:** 8 live signals — CI 95% precision SHORT là [23%–88%], chưa thể kết luận chắc
-- **1 market regime:** 5.9 ngày, BTC $79K–$82K sideways — chưa test trending/high-volatility
-- **TP/SL chưa calibrate:** 10/10 paper trades EXPIRED
-- **LONG model yếu:** live precision 0% (3 signals, quá ít để đánh giá)
-
-### Điều kiện để trade thật
-
-- [ ] ≥ 50 signals resolved trong `signal_outcomes.csv`
-- [ ] SHORT precision ổn định ≥ 55% qua nhiều ngày
-- [ ] Calibrate TP/SL dựa trên biên độ cascade thực tế
-- [ ] Test qua ít nhất 2–3 market regime (cần 3–4 tuần)
-
-### Roadmap
-
-- [ ] Walk-forward backtesting (nhiều time splits)
-- [ ] Calibrate TP/SL tự động từ signal_outcomes
-- [ ] Live trading size nhỏ sau khi đủ điều kiện
-- [ ] Cải thiện LONG model
-- [ ] Multi-symbol (ETH, SOL)
-- [ ] Optuna hyperparameter tuning
-
----
-
-## 44 Features
-
-| Category | Features | Nguồn |
-|---|---|---|
-| Price (5) | price_change_1m/30s, volatility_1m, volume_1m, taker_buy_ratio | klines_1s.csv |
-| Liquidation (5) | liq_long/short_usd_1m, liq_total, liq_ratio, liq_accel_30s | liquidations.csv |
-| Order book (7) | imbalance_now/avg_1m/trend, spread, bid/ask_vol, wall_ratio | orderbook.csv |
-| CVD futures (8) | cvd_delta_1m/30s, whale_buy/sell_count/net/usd, whale_dominance | aggtrades.csv |
-| CVD spot (3) | spot_cvd_delta_1m/30s, cvd_divergence | spot_aggtrades.csv |
-| Basis (3) | basis_pct, basis_change_1m, basis_positive | basis.csv |
-| Open interest (4) | delta_oi_1m/30m/1h, oi_acceleration | open_interest.csv |
-| Funding (8) | funding_rate, funding_rate_abs, funding_bias, long/short_heavy, rate_change, trend_3h, secs_to_next, urgency | funding_rate.csv |
-
-**Label definition:**
-- `cascade_short_Xm = 1` nếu `min(low[T → T+Xm]) ≤ liq_zone_lower`
-- `cascade_long_Xm  = 1` nếu `max(high[T → T+Xm]) ≥ liq_zone_upper`
-
----
-
-## Project Structure
-
-```
-btc-liq-predictor/
-├── collector/              # Layer 1 — 8 Binance streams
-│   ├── main.py             #   Entry point asyncio multi-stream
-│   ├── ws_kline.py         #   → klines_1s.csv
-│   ├── ws_liquidation.py   #   → liquidations.csv
-│   ├── ws_orderbook.py     #   → orderbook.csv
-│   ├── ws_aggtrade.py      #   → aggtrades.csv (futures CVD)
-│   ├── ws_spot_aggtrade.py #   → spot_aggtrades.csv (spot CVD)
-│   ├── rest_oi.py          #   → open_interest.csv
-│   ├── rest_funding.py     #   → funding_rate.csv
-│   └── rest_basis.py       #   → basis.csv
-│
-├── feature_engine/         # Layer 2+3 — Features + Labels
-│   ├── run.py              #   Loop mỗi 1 phút
-│   ├── build_features.py   #   Merge 44 features thành 1 row
-│   ├── label_builder.py    #   cascade_short/long_Xm labels
-│   └── feat_*.py           #   8 feature modules (per source)
-│
-├── ml/                     # Layer 4 — Training & Inference
-│   ├── train.py            #   RandomForest, 6 models, time-split 80/20
-│   ├── auto_train.py       #   Auto-retrain mỗi 1 giờ
-│   ├── predict.py          #   load_model() / predict_signal()
-│   └── artifacts/          #   *.pkl + meta.json (gitignored)
-│
-├── signal/                 # Layer 5 — Signal + Paper Trading
-│   ├── run.py              #   Inference loop mỗi 1 phút
-│   ├── paper_log.py        #   Log + evaluate paper trades
-│   └── notifier.py         #   Telegram alerts (optional)
-│
-├── server/                 # Layer 6 — Web Dashboard
-│   ├── btc_dashboard/      #   Django project (settings, asgi, urls)
-│   ├── dashboard/          #   WebSocket consumer + broadcaster
-│   ├── static/             #   JS charts (LightweightCharts, Chart.js)
-│   └── templates/
-│
-├── scripts/
-│   ├── signal_validator.py #   24/7 TP/FP tracker → signal_outcomes.csv
-│   ├── live_predict.py     #   Real-time prob display (terminal)
-│   ├── benchmark_models.py #   So sánh RF/XGB/LGB/CatBoost/ET
-│   ├── monitor_short.py    #   SHORT signal monitor (tmux)
-│   └── rebuild_features.py #   Rebuild features_1m.csv từ raw data
-│
-├── data/                   # gitignored — generated at runtime
-│   ├── features_1m.csv     #   44 features + labels, 1 row/phút
-│   ├── paper_trades.csv    #   Paper trading log
-│   └── signal_outcomes.csv #   TP/FP tracking 24/7
-│
-├── config.py               # Single source of truth: paths + constants
-├── requirements.txt
-├── Makefile
-├── pyproject.toml
-├── .env.example
-└── docker/docker-compose.yml
-```
-
----
-
-## Quick Start
+### Prerequisites
 
 ```bash
-# 1. Setup
-git clone <repo-url> && cd btc-liq-predictor
-make setup
-cp .env.example .env   # set DJANGO_SECRET_KEY
-
-# 2. Chạy tất cả services (tmux)
-make tmux
-# → 6 windows: collector, features, auto_train, signal, server, validator
-
-# Hoặc từng service riêng
-make collector     # stream data từ Binance
-make features      # build 44 features mỗi 1 phút
-make auto-train    # retrain model mỗi 1 giờ
-make signal        # inference + paper trades
-make server        # dashboard http://localhost:8000
-make validate      # 24/7 signal TP/FP tracker
-
-# Docker (production)
-make docker-up
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
----
-
-## Commands
+### Start all services
 
 ```bash
-make status        # trạng thái tmux session
-make train         # train model thủ công
-make monitor       # SHORT signal monitor real-time
-make validate      # 24/7 signal TP/FP tracker
-make rebuild       # rebuild features_1m.csv từ raw data
-make test          # chạy test suite
-make lint          # flake8
-make clean         # xóa cache
+# Create tmux session
+tmux new-session -s btc -n signal -d
+tmux new-window -t btc -n collector
+tmux new-window -t btc -n features
+tmux new-window -t btc -n server
+tmux new-window -t btc -n auto_train
+tmux new-window -t btc -n monitor
+tmux new-window -t btc -n validator
+
+# Start each service
+tmux send-keys -t btc:0 "python3 signal/run.py" Enter
+tmux send-keys -t btc:1 "python3 collector/main.py" Enter
+tmux send-keys -t btc:2 "python3 feature_engine/run.py" Enter
+tmux send-keys -t btc:3 "python3 server/manage.py runserver 0.0.0.0:8000" Enter
+tmux send-keys -t btc:4 "python3 ml/auto_train.py" Enter
+tmux send-keys -t btc:5 "python3 scripts/monitor_short.py" Enter
+tmux send-keys -t btc:6 "python3 scripts/signal_validator.py" Enter
 ```
 
----
-
-## Environment Variables
-
-| Variable | Required | Default | Mô tả |
-|---|---|---|---|
-| `DJANGO_SECRET_KEY` | Yes | — | Django secret key |
-| `SIGNAL_THRESHOLD` | No | 0.60 | Ngưỡng prob để bắn signal |
-| `MIN_RR` | No | 1.5 | Risk:Reward tối thiểu |
-| `TELEGRAM_BOT_TOKEN` | No | — | Telegram alert |
-| `TELEGRAM_CHAT_ID` | No | — | Telegram chat ID |
-
----
-
-## Docker
+### First-time setup (no model yet)
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d
-docker compose -f docker/docker-compose.yml logs -f
+# Collect at least 4 hours of data, then:
+python3 feature_engine/run.py      # build features
+python3 ml/train.py                # train initial model
+python3 signal/run.py              # start signal engine
 ```
 
-6 services: `collector`, `feature_engine`, `auto_train`, `signal`, `dashboard`, `validator`.
+### Configuration
+
+All parameters live in `config.py` (override via environment variables):
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `SIGNAL_THRESHOLD` | 0.65 | Minimum cascade probability to fire signal |
+| `CASCADE_TP_PCT` | 0.12% | Take-profit distance |
+| `CASCADE_SL_PCT` | 0.12% | Stop-loss distance |
+| `SIGNAL_COOLDOWN` | 900s | Per-direction cooldown between signals |
+| `MAX_TTC` | 2.0 min | Max predicted time-to-cascade |
+| `USE_MAKER` | true | Use maker limit orders |
+| `MAKER_OFFSET_PCT` | 0.005% | Maker order offset from market price |
 
 ---
 
-## License
+## Model
 
-MIT
+### Ensemble: RF + LR + XGB
+
+- **6 cascade models:** `ens_cascade_{long/short}_{1/2/3}m.pkl`
+- **6 TP-hit models:** `ens_tp_hit_{long/short}_{1/2/3}m.pkl` *(not yet in production — needs 50k+ rows)*
+- Artifacts: `ml/artifacts/`
+
+### Label Definition
+
+```
+cascade_long_Xm  = 1  if  sum(liq_short_usd[T → T+Xm]) > 3× baseline/min × X
+cascade_short_Xm = 1  if  sum(liq_long_usd[T → T+Xm])  > 3× baseline/min × X
+```
+
+Baseline uses expanding lookback: 30m → 2h → 6h → 24h → global median.
+
+### Model Performance (as of 2026-05-30, 17,968 rows, 303 auto-retrains)
+
+| Target | AUC |
+|--------|-----|
+| cascade_long_1m | 0.784 |
+| cascade_short_1m | 0.747 |
+| cascade_short_2m | 0.698 |
+| cascade_long_2m | 0.665 |
+| cascade_short_3m | 0.654 |
+| cascade_long_3m | 0.639 |
+| **Average** | **0.698** |
+
+AUC stabilized around 0.698–0.702 with > 14k rows.
+
+---
+
+## 38 Input Features
+
+Built every 1 minute from 7 live data streams:
+
+| Category | Features |
+|----------|----------|
+| Price & volatility | return_1m/5m/15m, high_low_range, volatility |
+| Liquidations | liq_long/short_usd (1m/5m/15m/1h), liq_total, liq_ratio |
+| CVD (Cumulative Volume Delta) | cvd_1m/5m/15m/1h, cvd_acceleration |
+| Order book | bid/ask imbalance, spread, top-5 depth |
+| Open interest | oi_change_1m/5m/15m, oi_total |
+| Funding rate | funding_rate, funding_long/short_heavy flag |
+| Whale trades | whale_buy/sell_usd, whale_net |
+
+---
+
+## Live Performance
+
+### Signal Validator (no cooldown — cleanest precision metric)
+
+*Period: 2026-05-26 → 2026-05-30 (after maker entry fix)*
+
+| Direction | Fires | TP | FP | Precision |
+|-----------|-------|----|----|-----------|
+| SHORT | 42 | 25 | 17 | **59.5%** |
+| Overall | 58 | 34 | 23 | 59.6% |
+
+### Paper Trading (15-min cooldown + open-trade filter)
+
+*Period: 2026-05-26 → 2026-05-30*
+
+| Direction | Fires | WIN | LOSS | WR | PnL |
+|-----------|-------|-----|------|----|-----|
+| **SHORT** | 40 | 18 | 2 | **90.0%** | **+1.92%** |
+| LONG | 27 | 2 | 15 | 12% | -1.56% |
+| **Combined** | 67 | 20 | 17 | **54.1%** | +0.36% |
+
+> SHORT WR of 90% is promising but based on n=20 resolved trades — 95% CI: [70%, 97%]. Requires n≥50 to draw conclusions. EXPIRED rate is 34% (TP/SL ±0.12% tight relative to 3-min price move).
+
+### All-Time Summary (2026-05-13 → 2026-05-30)
+
+| Metric | Value |
+|--------|-------|
+| Total paper trades fired | 219 |
+| Resolved win rate | 24.6% |
+| Total PnL | -22.45% |
+| EXPIRED | 78 (36%) |
+
+> All-time WR dragged down by LONG trades (7.6% WR, dominant in early downtrend phase). SHORT-only WR all-time: 50% (8/16 resolved).
+
+---
+
+## Key Engineering Decisions
+
+| Decision | Reason |
+|----------|--------|
+| Maker orders only | Cascade median move (0.029%) < taker fee (0.10%) |
+| Ensemble RF+LR+XGB | Single RF overfits; LR adds calibration; XGB adds non-linearity |
+| No hard liquidation filter | `liq_total_1m` is feature #3 — model learns threshold internally |
+| Deduped predict (1×/min) | Features update every 60s; 10s poll gives ≤10s latency, no redundant inference |
+| Parallel LONG/SHORT predict | `ThreadPoolExecutor(max_workers=2)` — RF/XGB release GIL; 1,300ms → 500ms |
+| SHORT entry below market | Cascade = immediate price drop; entry at `price × (1 − 0.005%)` fills when `low ≤ entry` |
+| Adaptive sleep | `sleep(max(0, 10s − elapsed))` ensures consistent 10s cycle regardless of predict duration |
+
+---
+
+## Directory Structure
+
+```
+config.py                    Single source of truth — all constants and paths
+collector/
+  main.py                    Entry: 7 async Binance streams
+  ws_*.py / rest_*.py        Individual stream handlers (liquidations, klines, OB, etc.)
+feature_engine/
+  run.py                     Entry: builds features + labels every 1 min
+  build_features.py          build_feature_row() — 38 features
+  label_builder.py           build_pending_labels(), build_tp_labels() (incremental O(new))
+ml/
+  train.py                   Train 6 cascade + 6 TP-hit ensemble models
+  auto_train.py              60-min retrain loop
+  predict.py                 load_model(), predict_cascade_signal(), predict_all()
+  artifacts/                 *.pkl models, meta.json, train_history.json
+signal/
+  run.py                     Entry: predict loop, cooldown, paper trade logging
+  paper_log.py               log_signal(), check_outcomes() via klines_1s
+  notifier.py                Telegram notifications
+scripts/
+  signal_validator.py        Validate signals without cooldown → signal_outcomes.csv
+  monitor_short.py           Live SHORT monitor (events from script-start only)
+server/                      Django dashboard — http://localhost:8000
+data/
+  features_1m.csv            Main ML dataset (17,968 rows, 09/05 → present)
+  paper_trades.csv           Paper trading log
+  signal_outcomes.csv        Validator log (ground truth for out-of-sample precision)
+  klines_1s.csv              1-second candles for outcome verification
+  liquidations.csv           Raw liquidation events from Binance
+```
+
+---
+
+## Roadmap
+
+### Immediate (no extra data needed)
+- Disable LONG signals — WR 7.6%, not viable in current regime
+
+### When SHORT validator reaches n=50 resolved
+- Re-evaluate precision; consider raising threshold to 0.70 if precision ≥ 75%
+
+### When 30 days of data collected
+- Walk-forward backtest before any capital allocation
+- Assess performance across multiple market regimes (bull/bear/sideways)
+
+### Long-term (50k+ rows)
+- Train TP-hit models (positive rate currently 1.5–3.8%)
+- Optuna hyperparameter tuning
+- DL models (GJR-GARCH+GRU, Bi-LSTM) — currently AUC 0.653 vs Ensemble 0.698
+- Add Binance API execution (~50 lines once precision is validated)
+
+---
+
+## Go-Live Criteria (not yet met)
+
+| Condition | Target | Current |
+|-----------|--------|---------|
+| SHORT precision (validator) | ≥ 75% sustained | 59.5% |
+| SHORT resolved signals | ≥ 50 | 42 |
+| Data coverage | ≥ 30 days, multiple regimes | 21 days, sideways/downtrend |
+| **Status** | | ❌ Not ready for live capital |
+
+---
+
+## Known Limitations
+
+1. **21 days of data, one regime** — model has not seen a bull market or high-volatility period
+2. **EXPIRED 34%** — TP/SL ±0.12% tight; price often doesn't move enough in 3 minutes
+3. **LONG not viable** — 7.6% WR in downtrend; to be re-evaluated in bull regime
+4. **TP-hit models not in production** — needs 50k+ rows to learn 1.5–3.8% positive rate
+5. **SOL pipeline** — separate tmux session `sol`, early stage, insufficient data
