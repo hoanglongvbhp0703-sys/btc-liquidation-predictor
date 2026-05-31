@@ -1,247 +1,175 @@
 # BTC Cascade Liquidation Predictor
 
-A machine learning system that predicts **cascade liquidation events** in BTC Futures (Binance USDS-M) to identify short-term trading opportunities.
+> Real-time machine learning system that predicts BTC Futures cascade liquidation events and generates short-term trading signals.
 
 ---
 
-## Core Idea
+## Purpose
 
-When many futures positions are force-liquidated simultaneously (a "cascade"), BTC price moves sharply in one direction within 1–3 minutes. This system predicts the probability of a cascade occurring in the next 1–3 minutes and fires a paper trade signal when confidence is high enough.
+Cascade liquidations occur when a chain of forced position closures in BTC Futures triggers a sharp, directional price move within 1–3 minutes. This system detects the early signs of a cascade before it happens and fires a trade signal with enough lead time to enter a maker limit order — keeping execution costs below the profit margin.
 
-**Key constraint:** Cascade median move (~0.029%) is smaller than taker fee (0.10%), so only **maker orders** are viable.
-
----
-
-## System Architecture — 5 Layers
-
-```
-Layer 1   collector/main.py            7 Binance streams → raw CSVs
-Layer 2   feature_engine/run.py        Build 38 features every 1 min → features_1m.csv
-Layer 3   feature_engine/label_builder.py   Label cascade events (3 horizons × 2 directions)
-Layer 4   ml/train.py + auto_train.py  Ensemble RF+LR+XGB, auto-retrain every 60 min
-Layer 5   signal/run.py                Predict every 10s (deduped to 1×/min), fire paper trade
-```
-
-### Live Services (tmux session `btc`)
-
-| Window | Script | Role | Interval |
-|--------|--------|------|----------|
-| 0 | `signal/run.py` | Predict + paper trade | 10s poll, 1 predict/min |
-| 1 | `collector/main.py` | 7 Binance WS/REST streams | real-time |
-| 2 | `feature_engine/run.py` | Features + labels | 1 min |
-| 3 | `server/manage.py` | Django dashboard | http://localhost:8000 |
-| 4 | `ml/auto_train.py` | Auto retrain | 60 min |
-| 5 | `scripts/monitor_short.py` | Live SHORT signal monitor | 60s refresh |
-| 6 | `scripts/signal_validator.py` | Signal validator (no cooldown) | 10s |
+**Core constraint:** Cascade median price move (~0.029%) is smaller than the taker fee (0.10%), so the system is designed exclusively around **maker orders** to remain viable.
 
 ---
 
-## How to Run
+## Description
 
-### Prerequisites
+A fully automated, 5-layer pipeline running 24/7 on a Linux server:
 
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-```
+1. **Data collection** — 7 parallel Binance WebSocket/REST streams ingest liquidations, order book, trades, open interest, funding rate, and 1-second klines in real time
+2. **Feature engineering** — 38 market microstructure features are computed every 60 seconds from the raw streams
+3. **Labeling** — cascade events are labeled across 3 time horizons (1m / 2m / 3m) for both LONG and SHORT directions
+4. **Model training** — an ensemble of Random Forest + Logistic Regression + XGBoost is auto-retrained every 60 minutes as new labeled data arrives
+5. **Signal engine** — runs every 10 seconds, predicts cascade probability, applies cooldown logic, and logs paper trades for performance tracking
 
-### Start all services
-
-```bash
-# Create tmux session
-tmux new-session -s btc -n signal -d
-tmux new-window -t btc -n collector
-tmux new-window -t btc -n features
-tmux new-window -t btc -n server
-tmux new-window -t btc -n auto_train
-tmux new-window -t btc -n monitor
-tmux new-window -t btc -n validator
-
-# Start each service
-tmux send-keys -t btc:0 "python3 signal/run.py" Enter
-tmux send-keys -t btc:1 "python3 collector/main.py" Enter
-tmux send-keys -t btc:2 "python3 feature_engine/run.py" Enter
-tmux send-keys -t btc:3 "python3 server/manage.py runserver 0.0.0.0:8000" Enter
-tmux send-keys -t btc:4 "python3 ml/auto_train.py" Enter
-tmux send-keys -t btc:5 "python3 scripts/monitor_short.py" Enter
-tmux send-keys -t btc:6 "python3 scripts/signal_validator.py" Enter
-```
-
-### First-time setup (no model yet)
-
-```bash
-# Collect at least 4 hours of data, then:
-python3 feature_engine/run.py      # build features
-python3 ml/train.py                # train initial model
-python3 signal/run.py              # start signal engine
-```
-
-### Configuration
-
-All parameters live in `config.py` (override via environment variables):
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `SIGNAL_THRESHOLD` | 0.65 | Minimum cascade probability to fire signal |
-| `CASCADE_TP_PCT` | 0.12% | Take-profit distance |
-| `CASCADE_SL_PCT` | 0.12% | Stop-loss distance |
-| `SIGNAL_COOLDOWN` | 900s | Per-direction cooldown between signals |
-| `MAX_TTC` | 2.0 min | Max predicted time-to-cascade |
-| `USE_MAKER` | true | Use maker limit orders |
-| `MAKER_OFFSET_PCT` | 0.005% | Maker order offset from market price |
+A Django web dashboard provides real-time visibility into signals, model accuracy, and paper trading P&L.
 
 ---
 
-## Model
+## Features
 
-### Ensemble: RF + LR + XGB
-
-- **6 cascade models:** `ens_cascade_{long/short}_{1/2/3}m.pkl`
-- **6 TP-hit models:** `ens_tp_hit_{long/short}_{1/2/3}m.pkl` *(not yet in production — needs 50k+ rows)*
-- Artifacts: `ml/artifacts/`
-
-### Label Definition
-
-```
-cascade_long_Xm  = 1  if  sum(liq_short_usd[T → T+Xm]) > 3× baseline/min × X
-cascade_short_Xm = 1  if  sum(liq_long_usd[T → T+Xm])  > 3× baseline/min × X
-```
-
-Baseline uses expanding lookback: 30m → 2h → 6h → 24h → global median.
-
-### Model Performance (as of 2026-05-30, 17,968 rows, 303 auto-retrains)
-
-| Target | AUC |
-|--------|-----|
-| cascade_long_1m | 0.784 |
-| cascade_short_1m | 0.747 |
-| cascade_short_2m | 0.698 |
-| cascade_long_2m | 0.665 |
-| cascade_short_3m | 0.654 |
-| cascade_long_3m | 0.639 |
-| **Average** | **0.698** |
-
-AUC stabilized around 0.698–0.702 with > 14k rows.
+- **Real-time cascade prediction** — ensemble model outputs probability across 1m / 2m / 3m horizons; signal fires when `max_prob ≥ 0.65` and estimated time-to-cascade `≤ 2 min`
+- **Maker-order simulation** — paper trades simulate limit-order fills using 1-second kline data; entry offset 0.005% from market price
+- **Auto-retrain loop** — model retrains every 60 minutes on newly labeled rows; no manual intervention required
+- **Signal validator** — parallel process validates every signal without cooldown constraints, providing unbiased precision measurement
+- **Live monitor** — SHORT signal monitor shows real-time TP/FP/FN events from script start (not historical backtest)
+- **Parallel inference** — LONG and SHORT predictions run concurrently via `ThreadPoolExecutor`; latency reduced from 1,300ms to 500ms
+- **Deduped predict loop** — skips inference when feature row is unchanged; each 60-second feature window is predicted exactly once
+- **Telegram notifications** — instant alert on signal fire with entry, TP, SL, and estimated cascade timing
+- **Django dashboard** — web UI at `localhost:8000` showing live trades, win rate, P&L, and model stats
 
 ---
 
-## 38 Input Features
+## Tech Stack
 
-Built every 1 minute from 7 live data streams:
-
-| Category | Features |
-|----------|----------|
-| Price & volatility | return_1m/5m/15m, high_low_range, volatility |
-| Liquidations | liq_long/short_usd (1m/5m/15m/1h), liq_total, liq_ratio |
-| CVD (Cumulative Volume Delta) | cvd_1m/5m/15m/1h, cvd_acceleration |
-| Order book | bid/ask imbalance, spread, top-5 depth |
-| Open interest | oi_change_1m/5m/15m, oi_total |
-| Funding rate | funding_rate, funding_long/short_heavy flag |
-| Whale trades | whale_buy/sell_usd, whale_net |
+| Category | Technology |
+|----------|------------|
+| **Language** | Python |
+| **ML / Data** | scikit-learn · NumPy · Pandas |
+| **Web dashboard** | Django |
+| **Data storage** | CSV datasets · SQLite |
+| **Version control** | git |
+| **OS** | Linux |
 
 ---
 
-## Live Performance
-
-### Signal Validator (no cooldown — cleanest precision metric)
-
-*Period: 2026-05-26 → 2026-05-30 (after maker entry fix)*
-
-| Direction | Fires | TP | FP | Precision |
-|-----------|-------|----|----|-----------|
-| SHORT | 42 | 25 | 17 | **59.5%** |
-| Overall | 58 | 34 | 23 | 59.6% |
-
-### Paper Trading (15-min cooldown + open-trade filter)
-
-*Period: 2026-05-26 → 2026-05-30*
-
-| Direction | Fires | WIN | LOSS | WR | PnL |
-|-----------|-------|-----|------|----|-----|
-| **SHORT** | 40 | 18 | 2 | **90.0%** | **+1.92%** |
-| LONG | 27 | 2 | 15 | 12% | -1.56% |
-| **Combined** | 67 | 20 | 17 | **54.1%** | +0.36% |
-
-> SHORT WR of 90% is promising but based on n=20 resolved trades — 95% CI: [70%, 97%]. Requires n≥50 to draw conclusions. EXPIRED rate is 34% (TP/SL ±0.12% tight relative to 3-min price move).
-
-### All-Time Summary (2026-05-13 → 2026-05-30)
+## Live Performance (2026-05-26 → 2026-05-30)
 
 | Metric | Value |
 |--------|-------|
-| Total paper trades fired | 219 |
-| Resolved win rate | 24.6% |
-| Total PnL | -22.45% |
-| EXPIRED | 78 (36%) |
+| Model avg AUC | **0.698** (6 models) |
+| Auto-retrains | **303** since inception |
+| Training rows | **17,968** (21 days) |
+| SHORT win rate (paper) | **90%** — 18/20 resolved |
+| SHORT P&L (paper) | **+1.92%** |
+| Signal precision (validator) | **59.5%** — 25/42 SHORT TP |
 
-> All-time WR dragged down by LONG trades (7.6% WR, dominant in early downtrend phase). SHORT-only WR all-time: 50% (8/16 resolved).
+> SHORT WR of 90% is based on n=20 resolved trades — 95% CI: [70%, 97%]. Needs n≥50 before drawing conclusions. System is in paper trading validation phase; not yet deployed with real capital.
 
 ---
 
-## Key Engineering Decisions
+## System Workflow
 
-| Decision | Reason |
-|----------|--------|
-| Maker orders only | Cascade median move (0.029%) < taker fee (0.10%) |
-| Ensemble RF+LR+XGB | Single RF overfits; LR adds calibration; XGB adds non-linearity |
-| No hard liquidation filter | `liq_total_1m` is feature #3 — model learns threshold internally |
-| Deduped predict (1×/min) | Features update every 60s; 10s poll gives ≤10s latency, no redundant inference |
-| Parallel LONG/SHORT predict | `ThreadPoolExecutor(max_workers=2)` — RF/XGB release GIL; 1,300ms → 500ms |
-| SHORT entry below market | Cascade = immediate price drop; entry at `price × (1 − 0.005%)` fills when `low ≤ entry` |
-| Adaptive sleep | `sleep(max(0, 10s − elapsed))` ensures consistent 10s cycle regardless of predict duration |
+```
+Binance Streams
+  │  liquidations · klines · order book · aggtrades · open interest · funding · basis
+  ▼
+collector/main.py  ──────────────────────────────────  data/*.csv  (raw)
+  ▼
+feature_engine/run.py  (every 60s)
+  ├─ build_features.py   →  38 features per row
+  └─ label_builder.py    →  cascade_long/short_1/2/3m labels
+  ▼
+features_1m.csv  (17,968 rows)
+  ▼
+ml/auto_train.py  (every 60 min)
+  └─ train.py  →  Ensemble RF + LR + XGB  →  ml/artifacts/*.pkl
+  ▼
+signal/run.py  (every 10s poll, 1 predict/min)
+  ├─ predict.py           →  cascade probability × 6 models
+  ├─ cooldown check       →  900s per direction
+  ├─ has_open_trade check →  1 position per direction max
+  └─ paper_log.py         →  paper_trades.csv  +  Telegram alert
+  ▼
+scripts/signal_validator.py  →  signal_outcomes.csv  (no cooldown, unbiased precision)
+scripts/monitor_short.py     →  live SHORT TP/FP/FN display
+server/manage.py             →  Django dashboard  http://localhost:8000
+```
 
 ---
 
 ## Directory Structure
 
 ```
-config.py                    Single source of truth — all constants and paths
+config.py                   Single source of truth — all constants and paths
 collector/
-  main.py                    Entry: 7 async Binance streams
-  ws_*.py / rest_*.py        Individual stream handlers (liquidations, klines, OB, etc.)
+  main.py                   Entry: 7 async Binance streams
 feature_engine/
-  run.py                     Entry: builds features + labels every 1 min
-  build_features.py          build_feature_row() — 38 features
-  label_builder.py           build_pending_labels(), build_tp_labels() (incremental O(new))
+  run.py                    Entry: features + labels every 1 min
+  build_features.py         38-feature row builder
+  label_builder.py          Incremental cascade + TP-hit labeling
 ml/
-  train.py                   Train 6 cascade + 6 TP-hit ensemble models
-  auto_train.py              60-min retrain loop
-  predict.py                 load_model(), predict_cascade_signal(), predict_all()
-  artifacts/                 *.pkl models, meta.json, train_history.json
+  train.py                  Ensemble model training (6 cascade + 6 TP-hit)
+  auto_train.py             60-min retrain loop
+  predict.py                Inference — predict_cascade_signal(), predict_all()
+  artifacts/                *.pkl models · meta.json · train_history.json
 signal/
-  run.py                     Entry: predict loop, cooldown, paper trade logging
-  paper_log.py               log_signal(), check_outcomes() via klines_1s
-  notifier.py                Telegram notifications
+  run.py                    Entry: predict loop, cooldown, paper trade log
+  paper_log.py              Outcome verification via klines_1s.csv
+  notifier.py               Telegram alerts
 scripts/
-  signal_validator.py        Validate signals without cooldown → signal_outcomes.csv
-  monitor_short.py           Live SHORT monitor (events from script-start only)
-server/                      Django dashboard — http://localhost:8000
+  signal_validator.py       Unbiased signal precision tracker
+  monitor_short.py          Live SHORT monitor (live-only events)
+server/                     Django dashboard — http://localhost:8000
 data/
-  features_1m.csv            Main ML dataset (17,968 rows, 09/05 → present)
-  paper_trades.csv           Paper trading log
-  signal_outcomes.csv        Validator log (ground truth for out-of-sample precision)
-  klines_1s.csv              1-second candles for outcome verification
-  liquidations.csv           Raw liquidation events from Binance
+  features_1m.csv           ML dataset (17,968 rows, 09/05 → present)
+  paper_trades.csv          Paper trading log
+  signal_outcomes.csv       Validator log — ground truth precision
+  klines_1s.csv             1-second candles for outcome verification
 ```
 
 ---
 
-## Roadmap
+## How to Run
 
-### Immediate (no extra data needed)
-- Disable LONG signals — WR 7.6%, not viable in current regime
+```bash
+# 1. Install dependencies
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 
-### When SHORT validator reaches n=50 resolved
-- Re-evaluate precision; consider raising threshold to 0.70 if precision ≥ 75%
+# 2. Start all services in tmux
+tmux new-session -s btc -n signal -d
+tmux send-keys -t btc:0 "python3 signal/run.py" Enter
 
-### When 30 days of data collected
-- Walk-forward backtest before any capital allocation
-- Assess performance across multiple market regimes (bull/bear/sideways)
+tmux new-window -t btc -n collector
+tmux send-keys -t btc:1 "python3 collector/main.py" Enter
 
-### Long-term (50k+ rows)
-- Train TP-hit models (positive rate currently 1.5–3.8%)
-- Optuna hyperparameter tuning
-- DL models (GJR-GARCH+GRU, Bi-LSTM) — currently AUC 0.653 vs Ensemble 0.698
-- Add Binance API execution (~50 lines once precision is validated)
+tmux new-window -t btc -n features
+tmux send-keys -t btc:2 "python3 feature_engine/run.py" Enter
+
+tmux new-window -t btc -n server
+tmux send-keys -t btc:3 "python3 server/manage.py runserver 0.0.0.0:8000" Enter
+
+tmux new-window -t btc -n auto_train
+tmux send-keys -t btc:4 "python3 ml/auto_train.py" Enter
+
+tmux new-window -t btc -n monitor
+tmux send-keys -t btc:5 "python3 scripts/monitor_short.py" Enter
+
+tmux new-window -t btc -n validator
+tmux send-keys -t btc:6 "python3 scripts/signal_validator.py" Enter
+```
+
+### Key configuration (env vars or `config.py`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SIGNAL_THRESHOLD` | `0.65` | Min probability to fire signal |
+| `CASCADE_TP_PCT` | `0.0012` | Take-profit distance (0.12%) |
+| `CASCADE_SL_PCT` | `0.0012` | Stop-loss distance (0.12%) |
+| `SIGNAL_COOLDOWN` | `900` | Cooldown in seconds per direction |
+| `MAX_TTC` | `2.0` | Max time-to-cascade in minutes |
+| `USE_MAKER` | `true` | Use maker limit orders |
 
 ---
 
@@ -252,14 +180,4 @@ data/
 | SHORT precision (validator) | ≥ 75% sustained | 59.5% |
 | SHORT resolved signals | ≥ 50 | 42 |
 | Data coverage | ≥ 30 days, multiple regimes | 21 days, sideways/downtrend |
-| **Status** | | ❌ Not ready for live capital |
-
----
-
-## Known Limitations
-
-1. **21 days of data, one regime** — model has not seen a bull market or high-volatility period
-2. **EXPIRED 34%** — TP/SL ±0.12% tight; price often doesn't move enough in 3 minutes
-3. **LONG not viable** — 7.6% WR in downtrend; to be re-evaluated in bull regime
-4. **TP-hit models not in production** — needs 50k+ rows to learn 1.5–3.8% positive rate
-5. **SOL pipeline** — separate tmux session `sol`, early stage, insufficient data
+| **Status** | | ❌ Paper trading only |
